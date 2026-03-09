@@ -53,3 +53,11 @@ export function updateProject(projectId, data) {
 export function importChapters(projectId, data) {
   return request.post(`/projects/${projectId}/import`,  data )
 }
+
+// 导入 EPUB 电子书
+export function importEpub(projectId, formData) {
+  // formData 是 FormData 对象，包含字段 file
+  return request.post(`/projects/${projectId}/import-epub`, formData, {
+    headers: { 'Content-Type': 'multipart/form-data' }
+  })
+}

@@ -52,7 +52,7 @@
 
         <el-container class="main">
             <!-- 左侧章节 -->
-            <el-aside width="240px" class="aside">
+            <el-aside class="aside" style="resize: horizontal; overflow:auto;">
                 <div class="aside-head">
                     <div class="aside-title">
                         <div class="title-left">
@@ -81,7 +81,21 @@
                             <el-icon>
                                 <Upload />
                             </el-icon>
-                            <span>批量导入</span>
+                            <span>导入 TXT/EPUB</span>
+                        </el-button>
+
+                        <el-button type="danger" plain size="small" @click="batchDeleteChapters">
+                            <el-icon>
+                                <Delete />
+                            </el-icon>
+                            <span>批量删除</span>
+                        </el-button>
+
+                        <el-button type="warning" plain size="small" @click="batchSplitByLLM">
+                            <el-icon>
+                                <MagicStick />
+                            </el-icon>
+                            <span>批量生成台词</span>
                         </el-button>
 
                         <el-button type="primary" plain size="small" @click="dialogNewChapter = true">
@@ -102,10 +116,12 @@
 
                 <!-- ✅ 替换开始 -->
                 <!-- 让树撑满剩余高度 -->
-                <div class="tree-container">
+                <div class="tree-container" @click.capture="onTreeClick">
                     <el-tree-v2 ref="chapterTreeRef" :data="filteredChapters" :props="{ value: 'id', label: 'title' }"
                         :item-size=45 :height="treeHeight" :current-node-key="activeChapterId"
-                        @node-click="onSelectChapter" :highlight-current="true" class="chapter-menu">
+                        show-checkbox node-key="id" :default-checked-keys="checkedChapterKeys"
+                        :check-on-click-node="false"
+                        @node-click="onSelectChapter" @check="onCheckChange" :highlight-current="true" class="chapter-menu">
                         <template #default="{ data, node }">
                             <el-icon>
                                 <Document />
@@ -239,6 +255,12 @@
                                         </el-icon>
                                     </template>
                                 </el-input>
+                                <el-select v-model="currentBatch" clearable placeholder="批次" class="filter-item w200">
+                                    <el-option v-for="tag in batchTags" :key="tag" :label="tag" :value="tag" />
+                                </el-select>
+                                <el-button v-if="currentBatch" type="danger" circle plain title="删除当前批次" @click="deleteCurrentBatch">
+                                    <el-icon><Delete/></el-icon>
+                                </el-button>
                                 <el-tooltip content="刷新列表" placement="top">
                                     <el-button @click="loadLines" circle plain>
                                         <el-icon>
@@ -680,7 +702,7 @@
 </template>
 
 <script setup>
-import { ref, computed, onMounted, watch } from 'vue'
+import { ref, computed, onMounted, watch, nextTick } from 'vue'
 import { useRoute } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import {
@@ -994,12 +1016,17 @@ async function saveProjectSettings() {
         }
         console.log('保存项目设置结果', projectId)
 
+        const oldTtsId = project.value?.tts_provider_id
         const res = await projectAPI.updateProject(projectId, payload)
         console.log('保存项目设置结果', res)
         if (res?.code === 200) {
             ElMessage.success('项目设置已保存')
             settingsVisible.value = false
             await loadProject() // 刷新头部显示的项目名等
+            // 如果 TTS Provider 改变了，重新加载音色列表
+            if (oldTtsId !== settingsForm.value.tts_provider_id) {
+                await loadVoices()
+            }
         } else {
             ElMessage.error(res?.message || '保存失败')
         }
@@ -1015,6 +1042,8 @@ async function saveProjectSettings() {
 const chapters = ref([]) // ChapterResponseDTO[]
 const activeChapterId = ref(null)
 const chapterKeyword = ref('')
+// ✅ 被勾选的章节 id 列表
+const checkedChapterKeys = ref([])
 const filteredChapters = computed(() => {
     const kw = chapterKeyword.value.trim().toLowerCase()
     return chapters.value.filter(c => c.title.toLowerCase().includes(kw))
@@ -1034,10 +1063,86 @@ async function loadChapters() {
     const res = await chapterAPI.getChaptersByProject(projectId)
     chapters.value = res?.code === 200 ? (res.data || []) : []
     stats.value.chapterCount = chapters.value.length
+    // 清空勾选
+    checkedChapterKeys.value = []
     // 不再自动选择章节，由 restoreLastChapter 处理
     if (activeChapterId.value && chapters.value.find(c => c.id === activeChapterId.value)) {
         await loadLines()
         await loadChapterDetail(activeChapterId.value)
+    }
+}
+
+// 批量删除勾选的章节
+async function batchDeleteChapters() {
+    if (checkedChapterKeys.value.length === 0) {
+        ElMessage.info('请先勾选要删除的章节')
+        return
+    }
+    try {
+        await ElMessageBox.confirm(
+            '确认删除所选章节？该操作无法撤销。',
+            '批量删除章节',
+            {
+                confirmButtonText: '删除',
+                cancelButtonText: '取消',
+                type: 'warning'
+            }
+        )
+    } catch {
+        return
+    }
+    // 依次调用删除接口
+    for (const id of checkedChapterKeys.value) {
+        await chapterAPI.deleteChapter(id)
+    }
+    ElMessage.success('已删除选中章节')
+    await loadChapters()
+}
+
+// 批量请求 LLM 拆分选中章节
+async function batchSplitByLLM() {
+    if (checkedChapterKeys.value.length === 0) {
+        ElMessage.info('请先勾选要生成台词的章节')
+        return
+    }
+
+    try {
+        await ElMessageBox.confirm(
+            '确认对所选章节按顺序调用LLM拆分？生成结果会追加为各章节的新批次。',
+            '批量生成台词',
+            {
+                confirmButtonText: '确定',
+                cancelButtonText: '取消',
+                type: 'warning'
+            }
+        )
+    } catch {
+        return
+    }
+
+    const loading = ElLoading.service({
+        lock: true,
+        text: '正在批量生成台词，请稍候...',
+        background: 'rgba(0, 0, 0, 0.4)',
+    })
+
+    try {
+        const res = await chapterAPI.batchSplitByLLM(projectId, checkedChapterKeys.value)
+        if (res?.code === 200) {
+            ElMessage.success('批量生成完成')
+            // 如果当前章节在勾选之中，刷新它的台词
+            if (checkedChapterKeys.value.includes(activeChapterId.value)) {
+                await loadLines()
+                await loadRoles()
+            }
+        } else {
+            ElMessage.warning(res?.message || '批量生成失败')
+        }
+    } catch (err) {
+        ElMessage.error('批量LLM请求失败，请稍后再试')
+        console.error('批量LLM失败:', err)
+    } finally {
+        loading.close()
     }
 }
 
@@ -1056,7 +1161,9 @@ function loadChapterContent(indexStr) {
     loadChapterDetail(activeChapterId.value)
 }
 // ✅ 修改后（TreeV2 版本）
-const onSelectChapter = (data) => {
+let lastCheckTime = 0
+
+const onSelectChapter = (data, node, event) => {
     // data 是章节对象，例如 { id: 1, title: "第一章 起始" }
     activeChapterId.value = data.id
 
@@ -1064,6 +1171,51 @@ const onSelectChapter = (data) => {
     loadChapterContent?.(data.id)
     // 记忆
     saveLastChapter();
+    
+    // 重置当前批次选择，以重新为新章节加载批次列表
+    currentBatch.value = null
+    
+    // 立即还原复选框状态，防止点击节点时被误选
+    // 使用 nextTick 确保 DOM 已更新
+    nextTick(() => {
+        if (chapterTreeRef.value) {
+            chapterTreeRef.value.setCheckedKeys(checkedChapterKeys.value)
+        }
+    })
+}
+
+// 当勾选状态变化时，检查是否真的是用户点击复选框
+function onCheckChange() {
+    // 如果点击复选框和选择节点的时间戳非常接近，说明是点击节点行时的副作用
+    const now = Date.now()
+    const timeDiff = now - lastCheckTime
+    
+    // 如果时间差小于 100ms，说明是同一次交互导致的，恢复状态
+    if (timeDiff < 100 && lastCheckTime > 0) {
+        setTimeout(() => {
+            if (chapterTreeRef.value) {
+                chapterTreeRef.value.setCheckedKeys(checkedChapterKeys.value)
+            }
+        }, 0)
+        lastCheckTime = 0
+        return
+    }
+    
+    lastCheckTime = 0
+    
+    // 正常情况：更新勾选状态
+    if (chapterTreeRef.value) {
+        checkedChapterKeys.value = chapterTreeRef.value.getCheckedKeys()
+    }
+}
+
+// 捕获点击事件，记录时间戳
+function onTreeClick(event) {
+    // 如果点击的不是复选框，记录时间戳供 onCheckChange 参考
+    const checkbox = event.target.closest('.el-checkbox')
+    if (!checkbox) {
+        lastCheckTime = Date.now()
+    }
 }
 
 const dialogNewChapter = ref(false)
@@ -1073,12 +1225,26 @@ const chapterForm = ref({ id: null, title: '' })
 async function createChapter() {
     const title = chapterForm.value.title?.trim()
     if (!title) return
-    const res = await chapterAPI.createChapter(title, projectId)
-    if (res?.code === 200) {
-        ElMessage.success('已创建章节')
-        dialogNewChapter.value = false
-        chapterForm.value = { id: null, title: '' }
-        await loadChapters()
+    const afterChapterId = activeChapterId.value || null
+    try {
+        const res = await chapterAPI.createChapter(title, projectId, afterChapterId)
+        if (res?.code === 200) {
+            ElMessage.success('已创建章节')
+            dialogNewChapter.value = false
+            chapterForm.value = { id: null, title: '' }
+            const newChapterId = res.data?.id
+            await loadChapters()
+            // 自动选择新建的章节
+            if (newChapterId) {
+                activeChapterId.value = newChapterId
+                await loadChapterDetail(newChapterId)
+            }
+        } else {
+            ElMessage.error(res?.message || '创建章节失败')
+        }
+    } catch (err) {
+        console.error('创建章节错误:', err)
+        ElMessage.error('创建章节出错: ' + (err.message || err))
     }
 }
 
@@ -1178,7 +1344,7 @@ async function splitByLLM() {
 
     try {
         await ElMessageBox.confirm(
-            '确定要调用 LLM 对该章节进行台词拆分吗？此操作可能覆盖原有台词。',
+            '确定要调用 LLM 对该章节进行台词拆分吗？新的台词分批追加到当前章节，已有历史不会删除。',
             '确认操作',
             {
                 confirmButtonText: '确定',
@@ -1188,16 +1354,6 @@ async function splitByLLM() {
         )
     } catch {
         // 用户点取消，直接返回
-        return
-    }
-    // 先删除原有台词
-    const res = await lineAPI.deleteLinesByChapter(activeChapterId.value)
-    if (res?.code === 200) {
-        ElMessage.success('已删除原有台词')
-        await loadLines()
-        await loadRoles()
-    } else {
-        ElMessage.error(res?.message || '删除原有台词失败')
         return
     }
 
@@ -1212,8 +1368,13 @@ async function splitByLLM() {
         const res = await chapterAPI.splitChapterByLLM(projectId, activeChapterId.value)
         if (res?.code === 200) {
             console.log('llm进行台词拆分请求结果 typeof=', typeof res.data, res.data)
+            const newBatchTag = res.data  // ✅ 获取新生成的批次号
             await loadLines()
             await loadRoles()
+            // ✅ 自动选中新生成的批次
+            if (newBatchTag) {
+                currentBatch.value = newBatchTag
+            }
         } else {
             ElMessage.warning(res?.message || '解析失败')
         }
@@ -1222,6 +1383,29 @@ async function splitByLLM() {
         console.error('LLM 请求失败:', err)
     } finally {
         loading.close()
+    }
+}
+
+// 删除当前选中的批次
+async function deleteCurrentBatch() {
+    if (!activeChapterId.value || !currentBatch.value) return
+    try {
+        await ElMessageBox.confirm(
+            `确认删除批次 ${currentBatch.value}？此操作不可撤销。`,
+            '删除批次',
+            { type: 'warning' }
+        )
+    } catch {
+        return
+    }
+    const res = await lineAPI.deleteLinesByBatch(activeChapterId.value, currentBatch.value)
+    if (res?.code === 200) {
+        ElMessage.success('已删除批次')
+        currentBatch.value = null
+        // 重新加载台词和批次列表
+        await loadLines()
+    } else {
+        ElMessage.error(res?.message || '删除失败')
     }
 }
 
@@ -1240,6 +1424,9 @@ async function splitByLLM() {
 
 // 台词列表
 const lines = ref([]) // LineResponseDTO[]
+// 批次标签及当前选中批次
+const batchTags = ref([])
+const currentBatch = ref(null)
 
 // 进度统计
 const generationStats = computed(() => {
@@ -1260,9 +1447,8 @@ const displayedLines = computed(() => {
     return lines.value
         .filter(l => (!roleFilter.value ? true : l.role_id === roleFilter.value))
         .filter(l => (l.text_content || '').toLowerCase().includes(kw))
-        // 
-        // ③ 状态筛选 ✅ 新增
         .filter(l => (!statusFilter.value ? true : l.status === statusFilter.value))
+        .filter(l => (!currentBatch.value ? true : l.batch_tag === currentBatch.value))
 })
 
 function tableHeaderStyle() { return { background: 'var(--el-fill-color-light)', fontWeight: 600, color: 'var(--el-text-color-primary)' } }
@@ -1272,12 +1458,19 @@ function tableHeaderStyle() { return { background: 'var(--el-fill-color-light)',
 
 async function loadLines() {
     if (!activeChapterId.value) return
+    // 加载该章节的所有台词
     const res = await lineAPI.getLinesByChapter(activeChapterId.value)
     lines.value = res?.code === 200 ? (res.data || []) : []
-    // 音频默认参数：
     stats.value.lineCount = lines.value.length
-    // ✅ 关键：当生成完成或路径发生变化时，强制重载对应 WaveCellPro
-
+    
+    // 加载该章节的批次列表
+    const batchRes = await lineAPI.getLineBatches(activeChapterId.value)
+    batchTags.value = batchRes?.code === 200 ? (batchRes.data || []) : []
+    
+    // 默认选择第一个批次，或者保持上一次选择
+    if (batchTags.value.length > 0 && !currentBatch.value) {
+        currentBatch.value = batchTags.value[0]
+    }
 }
 
 // async function doProcess(row) {
@@ -1484,9 +1677,10 @@ async function loadRoles() {
 }
 
 async function loadVoices() {
-    // 默认 TTS = 1
-    const res = await voiceAPI.getVoicesByTTS()
-    console.log('loadVoices', res)
+    // 使用项目设置的 TTS Provider ID
+    const ttsId = project.value?.tts_provider_id || 1
+    const res = await voiceAPI.getVoicesByTTS(ttsId)
+    console.log('loadVoices', res, 'ttsId=', ttsId)
     voicesOptions.value = res?.code === 200 ? (res.data || []) : []
 }
 
@@ -1686,7 +1880,8 @@ async function insertBelow(row) {
         line_order: 0, // 随便，后面统一重排
         is_done: 0,
         emotion_id: row.emotion_id,
-        strength_id: row.strength_id
+        strength_id: row.strength_id,
+        batch_tag: currentBatch.value || null  // ✅ 关联当前批次
     })
     if (createRes?.code !== 200 || !createRes.data?.id) {
         return ElMessage.error(createRes?.message || '插入失败')
@@ -1706,6 +1901,7 @@ async function insertBelow(row) {
         text_content: '',
         status: 'pending',
         is_done: 0,
+        batch_tag: currentBatch.value || null,  // ✅ 关联当前批次
         // 情绪和强度继承当前行
 
     }
@@ -1740,7 +1936,8 @@ async function insertAtTop() {
         role_id: null,
         text_content: '',
         status: 'pending',
-        line_order: 0 // 随便，后面统一重排
+        line_order: 0, // 随便，后面统一重排
+        batch_tag: currentBatch.value || null  // ✅ 关联当前批次
     })
     if (createRes?.code !== 200 || !createRes.data?.id) {
         return ElMessage.error(createRes?.message || '插入失败')
@@ -1753,7 +1950,8 @@ async function insertAtTop() {
         chapter_id: activeChapterId.value,
         role_id: null,
         text_content: '',
-        status: 'pending'
+        status: 'pending',
+        batch_tag: currentBatch.value || null  // ✅ 关联当前批次
     }
 
     lines.value.unshift(newLine) // 插到数组开头
@@ -2788,6 +2986,14 @@ const lineColumns = reactive([
         cellRenderer: ({ rowData }) => rowData.line_order,
     },
     {
+        key: 'batch_tag',
+        title: '批次',
+        width: 120,
+        minWidth: 80,
+        align: 'center',
+        cellRenderer: ({ rowData }) => rowData.batch_tag || '-',
+    },
+    {
         key: 'role_id',
         title: '角色',
         width: 100,
@@ -3203,8 +3409,8 @@ async function handleBatchImport() {
     try {
         // 1️⃣ 弹出确认框
         await ElMessageBox.confirm(
-            '已存在的章节名不会重复导入，只会导入新的章节！',
-            '批量导入章节',
+            '已存在的章节名不会重复导入，只会导入新的章节！支持 TXT 和 EPUB 文件。',
+            '导入 TXT/EPUB 文件',
             {
                 confirmButtonText: '确定',
                 cancelButtonText: '取消',
@@ -3215,7 +3421,15 @@ async function handleBatchImport() {
 
         // 3️⃣ 打开文件选择框
         const pickerResult = await window.showOpenFilePicker({
-            types: [{ description: '文本文件', accept: { 'text/plain': ['.txt'] } }],
+            types: [
+                {
+                    description: '文本或电子书',
+                    accept: {
+                        'text/plain': ['.txt'],
+                        'application/epub+zip': ['.epub']
+                    }
+                }
+            ],
             excludeAcceptAllOption: true,
             multiple: false,
         }).catch(() => null)
@@ -3227,6 +3441,28 @@ async function handleBatchImport() {
 
         const [fileHandle] = pickerResult
         const file = await fileHandle.getFile()
+
+        // 判断文件类型
+        if (file.name.endsWith('.epub')) {
+            // EPUB 处理
+            loadingInstance = ElLoading.service({
+                lock: true,
+                text: '正在导入 EPUB，请稍候...',
+                background: 'rgba(0, 0, 0, 0.4)',
+            })
+            const formData = new FormData()
+            formData.append('file', file)
+            const res = await projectAPI.importEpub(projectId, formData)
+            if (res?.code === 200) {
+                ElMessage.success('EPUB 文件已成功导入')
+                await loadChapters()
+            } else {
+                ElMessage.error(res?.message || 'EPUB 导入失败')
+            }
+            // 结束后返回
+            return
+        }
+
         // ✅ 使用 TextDecoder 解决乱码
         const arrayBuffer = await file.arrayBuffer()
         // ✅ 仅 UTF-8 / GBK 自动识别
@@ -3447,11 +3683,15 @@ function restoreLastChapter() {
 }
 
 .aside {
+    width: 240px;
     height: 92vh;
     padding: 5px;
     background: var(--el-bg-color);
     /* border: 1px red solid; */
     overflow: auto;
+    resize: horizontal;
+    min-width: 120px;
+    max-width: 600px;
 }
 
 .aside-head {
@@ -3510,11 +3750,11 @@ function restoreLastChapter() {
     justify-content: center;
     /* ✅ 居中关键 */
     flex-shrink: 0;
+    flex-wrap: wrap; /* 允许换行 */
     gap: 10px;
     /* 按钮间距 */
     margin: 10px 0;
     padding: 8px 0;
-
 
     border-top: 1px solid var(--el-border-color-lighter);
 }
@@ -3570,20 +3810,19 @@ function restoreLastChapter() {
 .chapter-item {
     display: flex;
     align-items: center;
-
-
+    justify-content: space-between;
+    flex: 1;
     transition: background-color var(--transition-fast), transform 0.1s ease;
 }
 
 
-/* 左侧标题区：固定宽度 */
+/* 左侧标题区：灵活宽度 */
 .chapter-title {
-    width: 160px;
-    /* ✅ 固定标题宽度 */
+    flex: 1;
+    min-width: 0;
+    /* ✅ 允许标题灵活伸缩，min-width: 0 支持文本截断 */
     font-size: 15px;
     color: var(--el-text-color-primary);
-
-
     transition: color var(--transition-fast);
 }
 
@@ -3602,11 +3841,12 @@ function restoreLastChapter() {
    📘 操作区整体
    ============================= */
 .chapter-ops {
-    width: 0;
-    /* ✅ 固定操作宽度 */
     display: flex;
+    flex: 0 0 auto;
     justify-content: flex-end;
     align-items: center;
+    gap: 2px;
+    margin-right: 12px;
     opacity: 0;
     transition: opacity 0.25s ease;
 }
@@ -3702,7 +3942,10 @@ function restoreLastChapter() {
 .chapter-card {
     flex: 0 0 auto;
     margin-bottom: 1px;
-
+    /* 可拖动调整高度 */
+    resize: vertical;
+    overflow: auto;
+    max-height: 80vh;
 }
 
 .chapter-card-head {
@@ -3738,9 +3981,10 @@ function restoreLastChapter() {
 }
 
 .chapter-scroll {
-    max-height: 220px;
+    /* 以前固定高度，现在让外层容器控制 */
+    max-height: none;
+    height: 100%;
     overflow: auto;
-    /* 必须 */
 }
 
 .chapter-text {

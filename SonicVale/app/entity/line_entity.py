@@ -18,6 +18,9 @@ class LineEntity:
     emotion_id : Optional[int] = None
     strength_id : Optional[int] = None
 
+    # 批次标签，用于区分同一章节的不同生成批次
+    batch_tag : Optional[str] = None
+
     audio_path : Optional[str] = None
     subtitle_path : Optional[str] = None
     status : Optional[str] = None

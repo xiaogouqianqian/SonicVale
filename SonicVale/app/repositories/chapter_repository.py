@@ -1,6 +1,6 @@
 from typing import Optional, Sequence
 
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.orm import Session
 
 from app.models.po import ChapterPO
@@ -15,8 +15,8 @@ class ChapterRepository:
         return self.db.get(ChapterPO, chapter_id)
 
     def get_all(self, project_id: int) -> Sequence[ChapterPO]:
-        """获取指定项目下的所有章节"""
-        stmt = select(ChapterPO).where(ChapterPO.project_id == project_id)
+        """获取指定项目下的所有章节，按 order_index 排序"""
+        stmt = select(ChapterPO).where(ChapterPO.project_id == project_id).order_by(ChapterPO.order_index.asc(), ChapterPO.id.asc())
         return self.db.execute(stmt).scalars().all()
 
     def create(self, chapter_data: ChapterPO) -> ChapterPO:
@@ -68,3 +68,14 @@ class ChapterRepository:
         """模糊搜索"""
         stmt = select(ChapterPO).where(ChapterPO.title.ilike(f"%{keyword}%"))
         return self.db.execute(stmt).scalars().all()
+
+    def shift_order_indices(self, project_id: int, from_index: int, shift: int) -> None:
+        """将指定项目中 order_index >= from_index 的章节向后移动 shift 位"""
+        stmt = (
+            update(ChapterPO)
+            .where(ChapterPO.project_id == project_id)
+            .where(ChapterPO.order_index >= from_index)
+            .values(order_index=ChapterPO.order_index + shift)
+        )
+        self.db.execute(stmt)
+        self.db.commit()

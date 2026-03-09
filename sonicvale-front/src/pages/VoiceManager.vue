@@ -6,8 +6,19 @@
         <el-select v-model="selectedTTS" placeholder="选择 TTS 引擎" class="tts-select" @change="loadVoices">
           <el-option v-for="t in ttsProviders" :key="t.id" :label="t.name" :value="t.id" />
         </el-select>
-        <el-button type="primary" :disabled="!selectedTTS" @click="openDialog()">新增音色</el-button>
-        <el-button type="success" plain :disabled="!selectedTTS || selectedCount === 0" @click="handleExportSelected">导出音色库（选中）</el-button>
+        <el-button type="primary" :disabled="!selectedTTS" @click="handleAddVoice">
+          {{ isSelectedGPTSoVITS ? '新增模型音色' : '新增音色' }}
+        </el-button>
+        <el-button
+          v-if="isSelectedGPTSoVITS"
+          type="info"
+          plain
+          :disabled="!selectedTTS"
+          @click="handleRefreshGPTModels"
+        >
+          刷新模型列表
+        </el-button>
+        <el-button v-if="!isSelectedGPTSoVITS" type="success" plain :disabled="!selectedTTS || selectedCount === 0" @click="handleExportSelected">导出音色库（选中）</el-button>
         <el-popconfirm
           title="确认删除选中的音色？"
           confirm-button-text="确定"
@@ -18,7 +29,7 @@
             <el-button type="danger" plain :disabled="!selectedTTS || selectedCount === 0">批量删除（选中）</el-button>
           </template>
         </el-popconfirm>
-        <el-button type="warning" :disabled="!selectedTTS" @click="handleImport">导入音色库</el-button>
+        <el-button v-if="!isSelectedGPTSoVITS" type="warning" :disabled="!selectedTTS" @click="handleImport">导入音色库</el-button>
       </div>
     </div>
 
@@ -61,7 +72,7 @@
 
       <el-table-column prop="name" label="名称" min-width="180" />
 
-      <el-table-column label="播放" width="160" align="center">
+      <el-table-column v-if="!isSelectedGPTSoVITS" label="播放" width="160" align="center">
         <template #default="{ row }">
           <el-button
             size="small"
@@ -96,7 +107,7 @@
         </template>
       </el-table-column>
 
-      <el-table-column label="参考音频/路径" min-width="200" align="center">
+      <el-table-column v-if="!isSelectedGPTSoVITS" label="参考音频/路径" min-width="200" align="center">
         <template #default="{ row }">
           <el-tooltip :content="row.reference_path ? row.reference_path : '未设置参考音频'" placement="top">
             <span class="path-ellipsis">{{ row.reference_path || '（未设置）' }}</span>
@@ -111,7 +122,7 @@
         <template #default="{ row }">{{ formatDateTime(row.updated_at) }}</template>
       </el-table-column>
 
-      <el-table-column label="操作" width="320" fixed="right" align="center">
+      <el-table-column :width="isSelectedGPTSoVITS ? 240 : 320" label="操作" fixed="right" align="center">
   <template #default="{ row }">
     <div class="flex justify-center gap-2">
       <el-button 
@@ -121,14 +132,16 @@
         @click="openDialog(row)">
         编辑
       </el-button>
-      <el-button 
+      <el-button
+        v-if="!isSelectedGPTSoVITS"
         type="success" 
         size="small" 
         plain
         @click="openCopyDialog(row)">
         复制
       </el-button>
-      <el-button 
+      <el-button
+        v-if="!isSelectedGPTSoVITS"
         type="warning" 
         size="small" 
         plain
@@ -189,7 +202,7 @@
 
 
 
-        <el-form-item label="参考音频">
+        <el-form-item v-if="!isSelectedGPTSoVITS" label="参考音频">
           <div class="pick-line">
             <el-input v-model="form.reference_path" placeholder="请选择本地音频文件" readonly style="width:420px" />
             <el-button @click="pickLocalAudioForBase" style="margin-left:8px">选择文件</el-button>
@@ -287,7 +300,7 @@ import { ElMessage } from 'element-plus'
 import { Headset } from '@element-plus/icons-vue'
 import dayjs from 'dayjs'
 import { createVoice, fetchVoicesByTTS, updateVoice, deleteVoice, exportVoices, importVoices, processVoiceAudio, copyVoice } from '../api/voice'
-import { fetchTTSProviders } from '../api/provider'
+import { fetchTTSProviders, importGPTSoVITSModel, syncGPTSoVITSModels } from '../api/provider'
 import WaveCellPro from '../components/WaveCellPro.vue'
 
 
@@ -306,6 +319,20 @@ const native = window.native
 const ttsProviders = ref([])
 const selectedTTS = ref(null)
 const voices = ref([])
+
+const isGPTSoVITSProviderName = (name) => {
+  const n = (name || '').toLowerCase()
+  return n === 'gptsovits_inference'
+}
+
+const selectedProvider = computed(() => {
+  return (ttsProviders.value || []).find(t => t.id === selectedTTS.value) || null
+})
+
+const isSelectedGPTSoVITS = computed(() => {
+  return isGPTSoVITSProviderName(selectedProvider.value?.name)
+})
+
 const voiceTableRef = ref(null)
 const selectedRows = ref([])
 const selectedIds = computed(() => (selectedRows.value || []).map(v => v?.id).filter(v => v !== null && v !== undefined))
@@ -460,7 +487,83 @@ const loadVoices = async () => {
   await clearTableSelection()
 }
 
+function getGPTProjectPathFromProvider(provider) {
+  if (!provider?.custom_params) return ''
+  try {
+    const params = JSON.parse(provider.custom_params)
+    return (params?.project_path || '').trim()
+  } catch {
+    return ''
+  }
+}
+
+async function handleAddVoice() {
+  if (!selectedTTS.value) return
+
+  if (!isSelectedGPTSoVITS.value) {
+    openDialog()
+    return
+  }
+
+  const provider = selectedProvider.value
+  const projectPath = getGPTProjectPathFromProvider(provider)
+  if (!projectPath) {
+    ElMessage.warning('请先到配置中心为 gptsovits_inference 设置项目路径')
+    return
+  }
+
+  const sourceDir = await native?.pickDirectory?.({ title: '选择要导入的模型目录（包含 infer_config.json）' })
+  if (!sourceDir) return
+
+  try {
+    const importRes = await importGPTSoVITSModel(selectedTTS.value, projectPath, sourceDir)
+    if (importRes?.code !== 200) {
+      ElMessage.error(importRes?.message || '模型导入失败')
+      return
+    }
+
+    const syncRes = await syncGPTSoVITSModels(selectedTTS.value, projectPath)
+    if (syncRes?.code === 200) {
+      ElMessage.success(syncRes?.message || '模型音色同步成功')
+      await loadVoices()
+    } else {
+      ElMessage.error(syncRes?.message || '模型音色同步失败')
+    }
+  } catch (e) {
+    console.error(e)
+    ElMessage.error('新增模型音色失败')
+  }
+}
+
+async function handleRefreshGPTModels() {
+  if (!selectedTTS.value || !isSelectedGPTSoVITS.value) return
+
+  const provider = selectedProvider.value
+  const projectPath = getGPTProjectPathFromProvider(provider)
+  if (!projectPath) {
+    ElMessage.warning('请先到配置中心为 gptsovits_inference 设置项目路径')
+    return
+  }
+
+  try {
+    const syncRes = await syncGPTSoVITSModels(selectedTTS.value, projectPath)
+    if (syncRes?.code === 200) {
+      await loadVoices()
+      ElMessage.success(syncRes?.message || '模型列表已刷新')
+    } else {
+      ElMessage.error(syncRes?.message || '刷新失败')
+    }
+  } catch (e) {
+    console.error(e)
+    ElMessage.error('刷新模型列表失败')
+  }
+}
+
 function openDialog(row) {
+  if (isSelectedGPTSoVITS.value) {
+    ElMessage.info('gptsovits_inference 音色请在配置中心通过“同步到音色库”管理')
+    return
+  }
   if (row) {
     form.value = {
       id: row.id,
@@ -626,6 +729,10 @@ function resetFilters() {
 }
 
 async function handleExportSelected() {
+  if (isSelectedGPTSoVITS.value) {
+    ElMessage.info('gptsovits_inference 不支持导出本地参考音频音色库')
+    return
+  }
   if (!selectedTTS.value) {
     ElMessage.warning('请先选择 TTS 引擎')
     return
@@ -694,6 +801,10 @@ async function pickImportDir() {
 
 // 打开导入弹窗
 async function handleImport() {
+  if (isSelectedGPTSoVITS.value) {
+    ElMessage.info('gptsovits_inference 不支持导入本地参考音频音色库')
+    return
+  }
   if (!selectedTTS.value) {
     ElMessage.warning('请先选择 TTS 引擎')
     return
@@ -758,6 +869,10 @@ const copyRules = {
 
 // 打开复制弹窗
 function openCopyDialog(row) {
+  if (isSelectedGPTSoVITS.value) {
+    ElMessage.info('gptsovits_inference 不支持复制本地参考音频音色')
+    return
+  }
   copyForm.value = {
     sourceId: row.id,
     sourceName: row.name,

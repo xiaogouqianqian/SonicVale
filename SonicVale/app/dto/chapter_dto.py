@@ -10,6 +10,7 @@ class ChapterCreateDTO(BaseModel):
     order_index: Optional[int] = None
     id: Optional[int] = None
     text_content : Optional[str] = None
+    after_chapter_id: Optional[int] = None
 
 class ChapterResponseDTO(BaseModel):
     title: str

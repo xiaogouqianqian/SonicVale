@@ -177,6 +177,28 @@
           <el-input v-model="ttsForm.api_key" placeholder="可留空" show-password />
         </el-form-item>
 
+        <el-form-item v-if="isGPTSoVITSProvider(ttsForm.name)" label="项目路径">
+          <div style="display:flex; gap:8px; width:100%;">
+            <el-input v-model="ttsForm.project_path" placeholder="GPT-SoVITS-Inference 项目根目录" />
+            <el-button @click="pickGPTSoVITSProjectPath">选择目录</el-button>
+          </div>
+        </el-form-item>
+
+        <el-form-item v-if="isGPTSoVITSProvider(ttsForm.name)" label="模型管理">
+          <div style="display:flex; flex-wrap:wrap; gap:8px;">
+            <el-button size="small" @click="validateCurrentGPTPath">验证路径</el-button>
+            <el-button size="small" @click="scanCurrentGPTModels">扫描模型</el-button>
+            <el-button size="small" @click="importOneGPTModel">导入模型目录</el-button>
+            <el-button type="primary" size="small" @click="syncCurrentGPTModels">同步到音色库</el-button>
+          </div>
+        </el-form-item>
+
+        <el-form-item v-if="isGPTSoVITSProvider(ttsForm.name)" label="扫描结果">
+          <div style="color: var(--el-text-color-regular);">
+            已扫描 {{ gptsovitsScanList.length }} 个模型
+          </div>
+        </el-form-item>
+
         <el-form-item label="状态">
           <el-switch v-model="ttsForm.status" :active-value="1" :inactive-value="0" />
         </el-form-item>
@@ -201,8 +223,12 @@ import { ElMessage } from 'element-plus'
 import { CopyDocument } from '@element-plus/icons-vue'
 import {
   fetchLLMProviders, createLLMProvider, updateLLMProvider, deleteLLMProvider,
-  fetchTTSProviders, updateTTSProvider, testLLMProvider, testTTSProvider
+  fetchTTSProviders, updateTTSProvider, testLLMProvider, testTTSProvider,
+  validateGPTSoVITSPath, scanGPTSoVITSModels, importGPTSoVITSModel, syncGPTSoVITSModels
 } from '../api/provider'
+
+// @ts-ignore - 由 preload 暴露
+const native = window.native
 
 const activeTab = ref('llm')
 
@@ -381,8 +407,11 @@ const ttsForm = ref({
   name: '',
   api_base_url: '',
   api_key: '',
+  custom_params: '',
+  project_path: '',
   status: 1,
 })
+const gptsovitsScanList = ref([])
 const ttsRules = {
   name: [{ required: true, message: '请输入名称', trigger: 'blur' }]
 }
@@ -393,7 +422,17 @@ const loadTTS = async () => {
 }
 
 function openTTSDialog(row) {
-  ttsForm.value = { ...row }
+  let projectPath = ''
+  if (row?.custom_params) {
+    try {
+      const parsed = JSON.parse(row.custom_params)
+      projectPath = parsed?.project_path || ''
+    } catch {
+      projectPath = ''
+    }
+  }
+  gptsovitsScanList.value = []
+  ttsForm.value = { ...row, custom_params: row?.custom_params || '', project_path: projectPath }
   ttsDialogVisible.value = true
 }
 
@@ -401,7 +440,23 @@ function submitTTS() {
   ttsFormRef.value.validate(async (valid) => {
     if (!valid) return
     try {
-      await updateTTSProvider(ttsForm.value.id, ttsForm.value)
+      const payload = { ...ttsForm.value }
+      if (isGPTSoVITSProvider(payload.name)) {
+        let params = {}
+        if (payload.custom_params) {
+          try {
+            params = JSON.parse(payload.custom_params)
+          } catch {
+            params = {}
+          }
+        }
+        params.engine_type = 'gptsovits_inference'
+        params.project_path = payload.project_path || ''
+        payload.custom_params = JSON.stringify(params)
+      }
+      delete payload.project_path
+
+      await updateTTSProvider(ttsForm.value.id, payload)
       ElMessage.success('已更新')
       ttsDialogVisible.value = false
       await loadTTS()
@@ -432,6 +487,69 @@ async function testTTS() {
     ElMessage.error('TTS 测试异常')
   } finally {
     loading.close()
+  }
+}
+
+function isGPTSoVITSProvider(name) {
+  const n = (name || '').toLowerCase()
+  return n === 'gptsovits_inference'
+}
+
+async function pickGPTSoVITSProjectPath() {
+  const dir = await native?.pickDirectory?.({ title: '选择 GPT-SoVITS-Inference 项目目录' })
+  if (dir) ttsForm.value.project_path = dir
+}
+
+async function validateCurrentGPTPath() {
+  if (!ttsForm.value.project_path) {
+    ElMessage.warning('请先填写项目路径')
+    return
+  }
+  const res = await validateGPTSoVITSPath(ttsForm.value.id, ttsForm.value.project_path)
+  if (res.code === 200 && res.data) ElMessage.success(res.message || '路径有效')
+  else ElMessage.error(res.message || '路径无效')
+}
+
+async function scanCurrentGPTModels() {
+  if (!ttsForm.value.project_path) {
+    ElMessage.warning('请先填写项目路径')
+    return
+  }
+  const res = await scanGPTSoVITSModels(ttsForm.value.id, ttsForm.value.project_path)
+  if (res.code === 200) {
+    gptsovitsScanList.value = Array.isArray(res.data) ? res.data : []
+    ElMessage.success(res.message || '扫描完成')
+  } else {
+    ElMessage.error(res.message || '扫描失败')
+  }
+}
+
+async function importOneGPTModel() {
+  if (!ttsForm.value.project_path) {
+    ElMessage.warning('请先填写项目路径')
+    return
+  }
+  const dir = await native?.pickDirectory?.({ title: '选择要导入的模型目录（包含 infer_config.json）' })
+  if (!dir) return
+  const res = await importGPTSoVITSModel(ttsForm.value.id, ttsForm.value.project_path, dir)
+  if (res.code === 200) {
+    ElMessage.success(res.message || '模型导入成功')
+    await scanCurrentGPTModels()
+  } else {
+    ElMessage.error(res.message || '模型导入失败')
+  }
+}
+
+async function syncCurrentGPTModels() {
+  if (!ttsForm.value.project_path) {
+    ElMessage.warning('请先填写项目路径')
+    return
+  }
+  const res = await syncGPTSoVITSModels(ttsForm.value.id, ttsForm.value.project_path)
+  if (res.code === 200) {
+    ElMessage.success(res.message || '同步成功')
+  } else {
+    ElMessage.error(res.message || '同步失败')
   }
 }
 

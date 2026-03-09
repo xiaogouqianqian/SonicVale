@@ -1,5 +1,6 @@
 
 from sqlalchemy import Column, Integer, Integer, String, Text, Enum, ForeignKey, DateTime, JSON, Index
+import time
 from datetime import datetime, timezone
 
 from app.db.database import Base
@@ -131,14 +132,12 @@ class LinePO(Base):
     strength_id = Column(Integer, nullable=True)
 
     # 9.1 新增
-
+    # 批次标签（用于区分不同批次的台词生成）
+    batch_tag = Column(String(255), nullable=True, index=True)
 
     # 输出资源
     audio_path = Column(String(500), nullable=True)
     subtitle_path = Column(String(500), nullable=True)
-
-    # 间隔停留时间（秒）
-    # wait_time = Column(Integer, default=0, nullable=True)
 
     # 状态
     status = Column(
@@ -196,6 +195,7 @@ class TTSProviderPO(Base):
     name = Column(String(255), nullable=False, unique=True)
     api_base_url = Column(String(500), nullable=False)
     api_key = Column(String(500), nullable=True)
+    custom_params = Column(Text, nullable=True)
     # voice_list = Column(JSON, nullable=True)
     status = Column(Integer, default=1, nullable=False)
 

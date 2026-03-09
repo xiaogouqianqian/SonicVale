@@ -62,3 +62,19 @@ export function testTTSProvider(data) {
   return request.post('/tts_providers/test', data)
 }
 
+export function validateGPTSoVITSPath(id, project_path) {
+  return request.post(`/tts_providers/${id}/gptsovits/validate_path`, { project_path })
+}
+
+export function scanGPTSoVITSModels(id, project_path) {
+  return request.post(`/tts_providers/${id}/gptsovits/scan_models`, { project_path })
+}
+
+export function importGPTSoVITSModel(id, project_path, source_model_dir) {
+  return request.post(`/tts_providers/${id}/gptsovits/import_model`, { project_path, source_model_dir })
+}
+
+export function syncGPTSoVITSModels(id, project_path) {
+  return request.post(`/tts_providers/${id}/gptsovits/sync_models`, { project_path })
+}
+

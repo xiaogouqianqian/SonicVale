@@ -3,8 +3,12 @@ import request from './config'
 export function deleteLinesByChapter(chapterId) {
   return request.delete(`/lines/lines/${chapterId}`)
 }
-export function getLinesByChapter(chapterId) {
-  return request.get(`/lines/lines/${chapterId}`)
+export function getLinesByChapter(chapterId, params = {}) {
+  return request.get(`/lines/lines/${chapterId}`, { params })
+}
+
+export function getLineBatches(chapterId) {
+  return request.get(`/lines/${chapterId}/batches`)
 }
 export function generateAudio(projectId, chapterId, body) {
   console.log('generateAudio', projectId, chapterId, body)
@@ -45,6 +49,10 @@ export async function reorderLinesByPut(orderList) {
 export function updateLineAudioPath(lineId, data) {
   // PUT /lines/{line_id}/audio_path
   return request.put(`/lines/${lineId}/audio_path`, data)
+}
+
+export function deleteLinesByBatch(chapterId, batchTag) {
+  return request.delete(`/lines/${chapterId}/batch/${batchTag}`)
 }
 
 

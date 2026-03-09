@@ -105,8 +105,10 @@ def get_line(line_id: int, line_service: LineService = Depends(get_line_service)
 @router.get("/lines/{chapter_id}", response_model=Res[List[LineResponseDTO]],
             summary="查询章节下的所有台词",
             description="根据章节id查询章节下的所有台词信息")
-def get_all_lines(chapter_id: int, line_service: LineService = Depends(get_line_service)):
-    entities = line_service.get_all_lines(chapter_id)
+def get_all_lines(chapter_id: int,
+                  batch: Optional[str] = Query(None, description="指定批次标签，仅返回该批次的台词"),
+                  line_service: LineService = Depends(get_line_service)):
+    entities = line_service.get_all_lines(chapter_id) if batch is None else line_service.get_all_lines(chapter_id, batch)
     if entities:
         res = [LineResponseDTO(**e.__dict__) for e in entities]
         return Res(data=res, code=200, message="查询成功")
@@ -140,13 +142,32 @@ def delete_line(line_id: int, line_service: LineService = Depends(get_line_servi
         return Res(data=None, code=400, message="删除失败或台词不存在")
 
 # 删除章节下所有台词
-@router.delete("/lines/{chapter_id}", response_model=Res,summary="删除章节下所有台词",description="根据章节id删除章节下的所有台词信息")
+@router.delete("/{chapter_id}", response_model=Res,summary="删除章节下所有台词",description="根据章节id删除章节下的所有台词信息")
 def delete_all_lines(chapter_id: int, line_service: LineService = Depends(get_line_service)):
     success = line_service.delete_all_lines(chapter_id)
     if success:
         return Res(data=None, code=200, message="删除成功")
     else:
         return Res(data=None, code=400, message="删除失败或台词不存在")
+
+# 删除指定批次
+@router.delete("/{chapter_id}/batch/{batch_tag}", response_model=Res,
+               summary="删除指定批次的台词",
+               description="根据章节ID和批次标签删除该批次生成的台词")
+def delete_lines_batch(chapter_id: int, batch_tag: str, line_service: LineService = Depends(get_line_service)):
+    success = line_service.delete_lines_by_batch(chapter_id, batch_tag)
+    if success:
+        return Res(data=None, code=200, message="批次删除成功")
+    else:
+        return Res(data=None, code=400, message="批次删除失败")
+
+# 获取某章节的所有批次标签
+@router.get("/{chapter_id}/batches", response_model=Res[List[str]],
+            summary="获取章节下批次列表",
+            description="返回该章节已经存在的生成批次标签")
+def get_line_batches(chapter_id: int, line_service: LineService = Depends(get_line_service)):
+    tags = line_service.list_batches(chapter_id)
+    return Res(data=tags, code=200, message="查询成功")
 
 
 

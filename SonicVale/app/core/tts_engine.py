@@ -1,6 +1,7 @@
 import requests
 from typing import Optional, List
 import os
+import json
 
 class TTSEngine:
     def __init__(self, base_url: str):
@@ -98,6 +99,84 @@ class TTSEngine:
             return {"code": 500, "msg": f"请求失败: {str(e)}"}
         except Exception as e:
             return {"code": 500, "msg": f"上传异常: {str(e)}"}
+
+
+class GPTSoVITSInferenceEngine:
+    def __init__(self, base_url: str, custom_params: Optional[str] = None):
+        self.base_url = base_url.rstrip("/")
+        self.custom_params = self._safe_load_params(custom_params)
+
+    @staticmethod
+    def _safe_load_params(custom_params: Optional[str]) -> dict:
+        if not custom_params:
+            return {}
+        if isinstance(custom_params, dict):
+            return custom_params
+        try:
+            return json.loads(custom_params)
+        except Exception:
+            return {}
+
+    def get_character_list(self) -> dict:
+        url = f"{self.base_url}/character_list"
+        resp = requests.get(url, timeout=10)
+        resp.raise_for_status()
+        data = resp.json()
+        if not isinstance(data, dict):
+            raise ValueError("character_list 返回格式错误")
+        return data
+
+    def resolve_emotion(self, character_map: dict, character: str, desired_emotion: Optional[str]) -> str:
+        if character not in character_map:
+            sample = list(character_map.keys())[:10]
+            raise ValueError(f"角色不存在: {character}，可用角色示例: {sample}")
+
+        emotions = character_map.get(character) or []
+        if not emotions:
+            return "default"
+        if desired_emotion and desired_emotion in emotions:
+            return desired_emotion
+        if "default" in emotions:
+            return "default"
+        return emotions[0]
+
+    def synthesize(
+        self,
+        text: str,
+        character: str,
+        emo_text: Optional[str] = None,
+        save_path: Optional[str] = None,
+    ) -> bytes:
+        url = f"{self.base_url}/tts"
+        character_map = self.get_character_list()
+        emotion = self.resolve_emotion(character_map, character, emo_text)
+
+        payload = {
+            "text": text,
+            "character": character,
+            "emotion": emotion,
+            "text_language": self.custom_params.get("text_language", "中文"),
+            "format": self.custom_params.get("default_format", "wav"),
+            "speed": self.custom_params.get("default_speed", 1.0),
+            "stream": False,
+        }
+
+        resp = requests.post(url, json=payload, timeout=120)
+        if resp.status_code != 200:
+            raise Exception(f"GPT-SoVITS synthesis failed: {resp.text}")
+
+        audio_bytes = resp.content
+        if save_path:
+            with open(save_path, "wb") as f:
+                f.write(audio_bytes)
+
+        return audio_bytes
+
+
+def build_tts_engine(provider_name: str, base_url: str, custom_params: Optional[str] = None):
+    if (provider_name or "").lower() == "gptsovits_inference":
+        return GPTSoVITSInferenceEngine(base_url, custom_params=custom_params)
+    return TTSEngine(base_url)
 if __name__ == "__main__":
     # 示例使用
     engine = TTSEngine("https://eihh5fmon4-8200.cnb.run/")

@@ -159,3 +159,48 @@ def import_project(project_id: int, dto: ProjectImportDTO,service: ProjectServic
         print("批量创建章节", name)
         chapter_service.create_chapter(ChapterEntity(project_id=project_id, title=name, text_content=content))
     return Res(code=200, message="导入成功")
+
+
+# 新增：EPUB 文件导入
+from fastapi import File, UploadFile
+import tempfile
+
+@router.post("/{project_id}/import-epub")
+async def import_epub(project_id: int,
+                      file: UploadFile = File(...),
+                      service: ProjectService = Depends(get_service),
+                      chapter_service: ChapterService = Depends(get_chapter_service)):
+    """上传 epub 文件，自动解析为章节并创建"""
+    project = service.get_project(project_id)
+    if project is None:
+        return Res(code=400, message="项目不存在")
+
+    # 将上传文件保存到临时位置
+    suffix = os.path.splitext(file.filename)[1]
+    if suffix.lower() != '.epub':
+        return Res(code=400, message="仅支持 EPUB 格式文件")
+
+    tmp_path = os.path.join(tempfile.gettempdir(), file.filename)
+    with open(tmp_path, 'wb') as f:
+        f.write(await file.read())
+
+    # 解析 epub
+    try:
+        from app.core.epub_parser import parse_epub
+        chapter_list = parse_epub(tmp_path)
+    except Exception as e:
+        return Res(code=500, message=f"EPUB 解析失败: {e}")
+    finally:
+        # 清理临时文件
+        try:
+            os.remove(tmp_path)
+        except Exception:
+            pass
+
+    if not chapter_list:
+        return Res(code=400, message="未能解析出章节内容")
+
+    for ch in chapter_list:
+        chapter_service.create_chapter(ChapterEntity(project_id=project_id, title=ch.get("chapter_name"), text_content=ch.get("content")))
+
+    return Res(code=200, message="EPUB 导入成功", data=chapter_list)

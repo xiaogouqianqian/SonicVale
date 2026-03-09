@@ -115,6 +115,33 @@ def add_custom_params_column():
         else:
             print("custom_params 列已存在，跳过。")
 
+
+def add_tts_custom_params_column():
+    with engine.begin() as conn:
+        result = conn.execute(text("PRAGMA table_info(tts_provider)"))
+        columns = [row[1] for row in result.fetchall()]
+        if "custom_params" not in columns:
+            conn.execute(text("ALTER TABLE tts_provider ADD COLUMN custom_params TEXT"))
+
+            import json
+            default_json = json.dumps(
+                {
+                    "engine_type": "gptsovits_inference",
+                    "project_path": "",
+                    "text_language": "中文",
+                    "default_format": "wav",
+                    "default_speed": 1.0,
+                },
+                ensure_ascii=False,
+            )
+            conn.execute(
+                text("UPDATE tts_provider SET custom_params = :val WHERE name = 'gptsovits_inference'"),
+                {"val": default_json},
+            )
+            print("已添加 tts_provider.custom_params 列。")
+        else:
+            print("tts_provider.custom_params 列已存在，跳过。")
+
 # 添加精准填充字段】
 def add_is_precise_fill_column():
     with engine.begin() as conn:  # ✅ 用 begin() 自动提交事务
@@ -137,6 +164,18 @@ def add_project_root_path_column():
 
             conn.commit()
 
+# 添加台词批次标签字段（batch_tag）用于区分不同批次的生成
+def add_batch_tag_column():
+    with engine.begin() as conn:  # ✅ 用 begin() 自动提交事务
+        result = conn.execute(text("PRAGMA table_info(lines)"))
+        columns = [row[1] for row in result.fetchall()]
+        if "batch_tag" not in columns:
+            # ✅ 添加列
+            conn.execute(text("ALTER TABLE lines ADD COLUMN batch_tag TEXT"))
+            conn.commit()
+        else:
+            print("batch_tag 列已存在，跳过。")
+
 def get_tts_service(db: Session = Depends(get_db)) -> TTSProviderService:
     return TTSProviderService(TTSProviderRepository(db))
 
@@ -154,10 +193,14 @@ async def startup_event():
     add_is_done_column()
     # v1.0.7 添加字段 custom_params
     add_custom_params_column()
+    # v1.1.0 添加 tts_provider 自定义参数字段
+    add_tts_custom_params_column()
     # v1.0.7 添加项目的字段 is_precise_fill
     add_is_precise_fill_column()
     # v1.0.7 添加项目的字段 project_root_path
     add_project_root_path_column()
+    # 添加台词批次标签字段
+    add_batch_tag_column()
 
     # 2) 初始化共享运行时
     try:

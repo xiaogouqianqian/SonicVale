@@ -1,193 +1,100 @@
 <div align="center">
 
-# 音谷 - AI 多角色多情绪配音平台
+# 音谷 - 修改说明（Fork 版本）
 
 </div>
-<p align="center">
 
-<!-- 🌟 官方链接徽章 -->
-<a href="https://sw4s2hg7k5y.feishu.cn/wiki/WjbUw1t7JiWIa7k2pFXcxqSbnde?from=from_copylink">
-  <img src="https://img.shields.io/badge/飞书-使用教程-4285F4?logo=googleclassroom&logoColor=white" />
-</a>
+<p align="center">
 <img src="https://img.shields.io/badge/license-AGPLv3-blue?logo=gnu" />
 <img src="https://img.shields.io/badge/release-v1.1.3-brightgreen?logo=semver" />
+<img src="https://img.shields.io/badge/type-change--summary-orange" />
 </p>
 
-> 一个开源的多角色、多情绪 AI 配音生成平台，支持小说、剧本、视频等内容的自动配音与导出。  
-
----
-## 📝 详细使用文档
-[音谷 - AI 多角色多情绪配音平台使用教程](https://sw4s2hg7k5y.feishu.cn/wiki/WjbUw1t7JiWIa7k2pFXcxqSbnde?from=from_copylink)
-## 📖 软件简介
-- **软件名称**：音谷 - AI 多角色多情绪配音平台  
-- **定位**：为小说、剧本、视频等内容提供多角色、多情绪的 AI 语音合成与配音服务  
-- **主要功能**：
-  - 小说 / 剧本文本导入
-  - 多角色角色库管理
-  - 情绪音色选择与绑定
-  - 台词自动拆分与配音生成
-  - 批量任务管理与导出
-  - 支持自定义 LLM 接口选择与调用
-  - 基于Index-TTS-2.0的多情绪TTS服务
-  - 支持精准的音频编辑功能，可以自定义删除音频片段或者添加静音片段。
-  - 支持自定义提示词，适配个性化拆分需求
-## 🛠 技术栈
-- **前端**：Electron + Vue + Element Plus  
-- **后端**：FastAPI / Python
-- **AI 接口**：兼容 OpenAI API 协议的大模型  
-- **TTS 服务**：IndexTTs-2 + Cloud Native Build 平台（免费 H20 显卡支持）/ 本地部署整合包
-
-## 二次开发说明
-本软件依据 **AGPL-3.0** 开源许可协议发布。基于本项目进行二次开发时，开发者须遵守以下规范：
-### 1. 署名要求
-必须在衍生软件的用户界面及代码文档中清晰标注：
-> "本软件基于开源项目《音谷》二次开发"
-
-并附上原项目仓库链接。
-### 2. 商业使用限制
-未获得书面商业授权前，任何基于本项目的衍生作品不得用于商业用途或提供商业服务。
-
-## 🚀 快速开始
-
-### 1️⃣ 克隆项目
-```bash
-git clone https://github.com/xcLee001/SonicVale.git
-cd SonicVale
-```
-### 2️⃣ 启动后端
-首先，需要下载ffmpeg.exe到app/core/ffmpeg/ffmpeg.exe
-
-
-可以去官网[ffmpeg](https://www.gyan.dev/ffmpeg/builds/packages/ffmpeg-8.0-full_build.7z)
-。也可以使用[此镜像](https://www.alipan.com/s/ey5QRqW3Jji)
-
-然后复制到app/core/ffmpeg/目录下
-
-安装依赖和启动服务
-```bash
-cd SonicVale
-pip install -r requirements.txt
-uvicorn app.main:app --reload --port 8200
-```
-
-
-```
-app/
-├── core/               # 全局配置、tts引擎、llm引擎、ffmpeg封装、字幕生成、websocket、异步队列
-├── db/                 # 数据库连接和Base
-├── models/             # ORM模型
-├── dto/                # 数据传输对象（请求/响应验证）
-├── entity/             # 实体类（结合 ORM 与业务层）
-├── repositories/       # 数据库封装
-├── services/           # 核心业务逻辑
-├── routers/            # FastAPI路由接口
-└── main.py             # FastAPI启动入口
-
-```
-
-
-
-### 3️⃣ 启动前端
-```bash
-cd sonicvale-front
-npm install   # 安装依赖
-npm run start # 启动前端包括electron
-```
-## Coffe
-如果您觉得我的项目对您有所帮助，欢迎您的赞助。您的支持将使我有更多的动力继续维护和改进这个项目。
-您可以通过扫描下面的二维码来请我喝杯咖啡：
-
-
-<img src="image/赞赏码.jpg" alt="赞赏码" width="320px" height="320px">
-
-## 🎥 效果演示
-👉 [点击查看 B 站演示效果视频](https://www.bilibili.com/video/BV1tSpTz6EBH/)
-
-
-## 📷 截图
-
-LLM 配置界面
-![alt text](image/image-1.png)
-
-TTS 配置界面
-![alt text](image/image-2.png)
-
-音色管理界面
-![alt text](image/image-3.png)
-
-项目创建界面
-![alt text](image/image-4.png)
-
-章节创建界面
-![alt text](image/image-5.png)
-
-章节内容导入
-![alt text](image/image-6.png)
-
-台词自动拆分
-![alt text](image/image-7.png)
-
-角色绑定，多章节共享角色音色
-![alt text](image/image-8.png)
-
-台词编辑，高度自定义
-![alt text](image/image-9.png)
-  - 在台词编辑区，用户可手动修改：
-    - 台词文本
-    - 角色归属
-    - 情绪类型
-    - 情绪轻度
-  - 修改后自动保存并更新。
-
-配音生成
-![alt text](image/image-10.png)
-
-生成后音频可编辑
-![alt text](image/image-11.png)
-
-
-
-## 📬 联系方式
-
-如果在使用过程中遇到 **Bug** 或者有 **功能建议**，请通过 [GitHub Issues](https://github.com/xcLee001/SonicVale/issues) 提交，这样可以帮助我们更好地跟踪与解决问题。  
-
-如果你希望加入用户交流社区，欢迎加入我们的 QQ 群：  
-
-- 💬 QQ交流群：1060711739（1群已满）、575715633（2群） （验证信息请填写 “音谷配音”）
-
-## 📜 协议
-
-本项目采用 [GNU Affero General Public License v3.0 (AGPL-3.0)](./LICENSE) 开源协议。  
-
-您可以自由地使用、复制、修改、合并、发布和分发本软件及其副本，但必须遵守以下条款：
-
-- 您必须在分发的软件中包含原始许可声明和版权声明。
-
-- 若您修改并发布本软件，或通过网络提供服务（如 SaaS、Web 应用），您必须同时公开修改后的源代码。
-
-- 您不得附加任何与 AGPL-3.0 条款冲突的限制。
-
-## ⚠️ 免责声明
-
-本项目仅供学习与研究使用。  
-用户不得利用本项目从事任何违法违规行为，包括但不限于：  
-- 克隆或模仿未经授权的声音；  
-- 侵犯他人声音权、肖像权、著作权、名誉权；  
-- 其他可能违反法律法规的行为。  
-
-开发者不对用户使用本项目所产生的任何后果负责，所有风险与责任由用户自行承担。  
-使用本项目即表示您已阅读并同意本免责声明。  
+> 本软件基于开源项目《音谷》二次开发
 
 ---
 
-## ⚠️ Disclaimer
+## 📌 相比原仓库的改动汇总
 
-This project is intended for research and educational purposes only.  
-Users are strictly prohibited from using this project for any unlawful activities, including but not limited to:  
-- Cloning or imitating voices without authorization;  
-- Infringing upon the rights of others (voice rights, portrait rights, copyrights, reputation rights, etc.);  
-- Any other activities in violation of applicable laws and regulations.  
+以下为当前仓库相对原仓库的主要改动（按模块归类）：
 
-The developer shall not be held liable for any consequences arising from the use of this project.  
-All risks and responsibilities lie solely with the user.  
-By using this project, you acknowledge that you have read and agreed to this disclaimer.
+## 1. 章节与文本导入
+
+- 新增 EPUB 导入能力：支持上传 `.epub` 文件并自动解析为章节（后端新增 `epub_parser`，前端导入入口升级为 `TXT/EPUB`）。
+- 章节创建支持“插入到指定章节后”：新增 `after_chapter_id`，可在当前章节后插入新章节并自动维护顺序。
+- 章节查询排序增强：按 `order_index` 与 `id` 稳定排序返回。
+
+## 2. LLM 拆分与旁白规则优化
+
+- 提示词规则升级：强调“完整句优先切分”，降低生硬截断。
+- 旁白命名规则升级：由单一 `旁白` 改为 `旁白-<角色名>视角`，无法判断时使用 `旁白-未知视角`。
+- 新增后处理逻辑：
+
+1. 自动归一化旁白角色名。
+2. 结合上下文推断旁白视角。
+3. 按句子边界切分长台词（目标约 50 字）。
+
+- 文本纠错兜底同步调整：遗漏句补回时默认角色为 `旁白-未知视角`。
+
+## 3. 台词批次（Batch）能力
+
+- 新增 `batch_tag` 字段（DTO / Entity / ORM / 数据库迁移）。
+- 台词生成策略由“覆盖旧结果”调整为“追加新批次”。
+- 新增批次能力：
+
+1. 查询章节批次列表。
+2. 按批次筛选台词。
+3. 按批次删除台词。
+
+- 前端支持批次筛选、批次删除，并在新增/插入台词时继承批次归属。
+
+## 4. 批量操作增强
+
+- 新增“批量生成台词”接口：支持按章节列表顺序调用 LLM。
+- 前端章节树支持勾选，新增“批量删除章节”“批量生成台词”。
+
+## 5. TTS 与 GPT-SoVITS Inference 集成
+
+- 新增 `gptsovits_inference` 引擎接入：
+
+1. 增加推理引擎类与构建工厂。
+2. 支持按角色名与情绪进行语音合成。
+3. 运行时传入情绪名（不再固定为 `None`）。
+
+- `tts_provider` 新增 `custom_params` 配置字段（含迁移与默认值初始化）。
+- 默认 TTS 提供方扩展：新增 `gptsovits_inference` 默认配置。
+
+## 6. GPT-SoVITS 模型管理
+
+- 新增后端服务：路径校验、模型扫描、模型导入、模型同步到音色库。
+- 新增 API：
+
+1. 校验 GPT-SoVITS 项目路径。
+2. 扫描模型。
+3. 导入模型目录。
+4. 同步模型到 `voice`。
+
+- 前端配置中心新增 GPT-SoVITS 可视化管理入口。
+- 前端音色管理页对 GPT-SoVITS 场景做功能分流（新增/刷新模型，禁用不适用的本地参考音频导入导出能力）。
+
+## 7. 依赖与工程化
+
+- 后端新增 EPUB 解析依赖：`ebooklib`、`beautifulsoup4`。
+- 前端版本号更新至 `1.1.3`，锁文件同步调整（移除 `jszip` 相关链路）。
+- 新增 `start-dev.bat`，用于一键启动后端与前端开发环境。
+
+---
+
+## 📜 开源协议与二次开发约束
+
+### 1. 上游仓库链接
+
+- 音谷（SonicVale）仓库：`https://github.com/xcLee001/SonicVale`
+- GPT-SoVITS-Inference 仓库：`https://github.com/X-T-E-R/GPT-SoVITS-Inference`
+
+本仓库功能实现参考并集成以上上游项目能力，发布与分发时请一并保留来源说明。
+
+### 2. 开源协议
+
+- 本项目采用 [GNU Affero General Public License v3.0 (AGPL-3.0)](./LICENSE)。
+- 分发、修改或以网络服务形式提供本项目时，应按 AGPL-3.0 要求公开对应源码并保留原始声明。

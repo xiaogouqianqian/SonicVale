@@ -16,7 +16,7 @@ from sqlalchemy import Sequence
 from app.core.audio_engin import AudioProcessor
 from app.core.config import getConfigPath, getFfmpegPath
 from app.core.subtitle import subtitle_engine
-from app.core.tts_engine import TTSEngine
+from app.core.tts_engine import build_tts_engine
 from app.dto.line_dto import LineCreateDTO, LineOrderDTO, LineAudioProcessDTO
 from app.entity.line_entity import LineEntity
 from app.models.po import LinePO, RolePO
@@ -67,9 +67,9 @@ class LineService:
         res = LineEntity(**data)
         return res
 
-    def get_all_lines(self,chapter_id: int) -> Sequence[LineEntity]:
-        """获取所有台词列表"""
-        pos = self.repository.get_all(chapter_id)
+    def get_all_lines(self,chapter_id: int, batch_tag: str | None = None) -> Sequence[LineEntity]:
+        """获取章节下所有台词列表，可按批次筛选"""
+        pos = self.repository.get_all(chapter_id, batch_tag)
         # pos -> entities
 
         entities = [
@@ -99,10 +99,25 @@ class LineService:
                     os.remove(line.audio_path)
         return self.repository.delete_all_by_chapter_id(chapter_id)
 
+    def delete_lines_by_batch(self, chapter_id: int, batch_tag: str) -> bool:
+        """删除指定批次的台词，并清理音频"""
+        for line in self.get_all_lines(chapter_id):
+            if line.batch_tag == batch_tag and line.audio_path:
+                with contextlib.suppress(FileNotFoundError):
+                    os.remove(line.audio_path)
+        return self.repository.delete_by_batch(chapter_id, batch_tag)
+
+    def list_batches(self, chapter_id: int) -> list[str]:
+        return self.repository.list_batches(chapter_id)
+    
+    def get_next_batch_number(self, chapter_id: int) -> str:
+        """获取该章节的下一个批次号"""
+        return self.repository.get_next_batch_number(chapter_id)
+
     # 单个台词新增
-    def add_new_line(self, line: LineCreateDTO,project_id,chapter_id,index,emotions_dict, strengths_dict,audio_path):
+    def add_new_line(self, line: LineCreateDTO, project_id, chapter_id, index, emotions_dict, strengths_dict, audio_path, batch_tag: str = None):
     #     先判断角色是否存在
-        role = self.role_repository.get_by_name(line.role_name,project_id)
+        role = self.role_repository.get_by_name(line.role_name, project_id)
         if role is None:
             #         新增角色
             role = self.role_repository.create(RolePO(name=line.role_name, project_id=project_id))
@@ -111,7 +126,7 @@ class LineService:
         # 获取强度id
         strength_id = strengths_dict.get(line.strength_name)
         res = self.repository.create(LinePO(text_content=line.text_content, role_id=role.id,
-                                           chapter_id=chapter_id,line_order = index+1,emotion_id=emotion_id,strength_id=strength_id))
+                                           chapter_id=chapter_id, line_order=index+1, emotion_id=emotion_id, strength_id=strength_id, batch_tag=batch_tag))
 
         # 新增台词,这里搞个audio_path
 
@@ -121,9 +136,11 @@ class LineService:
         self.repository.update(res.id, {"audio_path": res_path})
 
 
-    def update_init_lines(self, lines: list, project_id: object, chapter_id: object,emotions_dict, strengths_dict,audio_path) -> None:
+    def update_init_lines(self, lines: list, project_id: object, chapter_id: object,
+                          emotions_dict, strengths_dict, audio_path, batch_tag: str = None) -> None:
+        """将解析得到的初始化台词追加到数据库。"""
         for index, line in enumerate(lines):
-            self.add_new_line(line,project_id,chapter_id,index,emotions_dict, strengths_dict,audio_path)
+            self.add_new_line(line, project_id, chapter_id, index, emotions_dict, strengths_dict, audio_path, batch_tag)
 
     # 获取章节下所有台词
 
@@ -138,25 +155,27 @@ class LineService:
         return True
     # 生成音频（服务器和本地两种方式）
 
-    def generate_audio(self, reference_path: str,tts_provider_id,content,emo_text:str,emo_vector:list[float],save_path= None):
-        #
+    def generate_audio(self, reference_path: str,tts_provider_id,content,emo_text:str,emo_vector:list[float],save_path= None, voice_name: str | None = None):
         tts_provider = self.tts_provider_repository.get_by_id(tts_provider_id)
-        tts_engine = TTSEngine(tts_provider.api_base_url)
-        # 先判断是否存在
+        if tts_provider is None:
+            raise ValueError(f"TTS provider 不存在: {tts_provider_id}")
 
+        engine = build_tts_engine(tts_provider.name, tts_provider.api_base_url, getattr(tts_provider, "custom_params", None))
 
-        # if not tts_engine.check_audio_exists(filename):
-        #     # 不存在就先上传
-        #     tts_engine.upload_audio(reference_path)
-        # return tts_engine.synthesize(content, filename,save_path)
+        # GPT-SoVITS-Inference 使用角色名直推，不需要上传参考音频。
+        if (tts_provider.name or "").lower() == "gptsovits_inference":
+            character = voice_name or reference_path
+            if not character:
+                raise ValueError("GPT-SoVITS 缺少角色名，无法合成")
+            return engine.synthesize(content, character, emo_text=emo_text, save_path=save_path)
+
         key = _lock_key(reference_path)
         lock = _file_locks[key]
 
         with lock:
-            if not tts_engine.check_audio_exists(reference_path):
-                tts_engine.upload_audio(reference_path,reference_path)
-            #     添加emo_text
-            return tts_engine.synthesize(content, reference_path,emo_text, emo_vector,save_path)
+            if not engine.check_audio_exists(reference_path):
+                engine.upload_audio(reference_path, reference_path)
+            return engine.synthesize(content, reference_path, emo_text, emo_vector, save_path)
 
     # 将角色role_id下所有台词的role_id都置位空
     def clear_role_id(self, role_id: int):

@@ -74,7 +74,7 @@ async def tts_worker(app: FastAPI):
             # emo_text = f"{strength.name}的{emotion.name} "
             # if emotion.name is "解说":
             #     emo_text = None
-            emo_text = None
+            emo_text = emotion.name
             emo_vector = emotion_text_to_vector(emotion.name, strength.name)
 
             project = project_service.get_project(project_id)
@@ -89,7 +89,8 @@ async def tts_worker(app: FastAPI):
                     dto.text_content,
                     emo_text,
                     emo_vector,
-                    dto.audio_path
+                    dto.audio_path,
+                    voice.name
                 ),
                 timeout=TTS_TIMEOUT_SECONDS
             )

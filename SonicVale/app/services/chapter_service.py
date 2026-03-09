@@ -34,10 +34,11 @@ class ChapterService:
         """注入 repository"""
         self.repository = repository
 
-    def create_chapter(self,  entity: ChapterEntity):
+    def create_chapter(self,  entity: ChapterEntity, after_chapter_id: int = None):
         """创建新章节
         - 检查同名章节是否存在
         - 如果存在，抛出异常或返回错误
+        - 如果指定了 after_chapter_id，在该章节之下插入
         - 调用 repository.create 插入数据库
         """
 
@@ -45,7 +46,29 @@ class ChapterService:
         if chapter:
             print("同名章节已存在")
             return None
-        # 手动将entity转化为po
+        
+        # 获取所有章节（已按 order_index 排序）
+        all_chapters = list(self.repository.get_all(entity.project_id))
+        
+        # 默认新章节的 order_index 在末尾
+        new_order_index = len(all_chapters) + 1
+        
+        # 如果指定了 after_chapter_id，重新计算插入位置
+        if after_chapter_id:
+            # 找到指定章节的位置并计算新的 order_index
+            for i, ch in enumerate(all_chapters):
+                if ch.id == after_chapter_id:
+                    new_order_index = i + 2  # 插入在该位置之后
+                    # 将原来在 i+1 位置及之后的所有章节 order_index 递增
+                    for j in range(i + 1, len(all_chapters)):
+                        old_index = all_chapters[j].order_index or (j + 1)
+                        self.repository.update(all_chapters[j].id, {'order_index': old_index + 1})
+                    break
+        
+        # 设置新章节的 order_index
+        entity.order_index = new_order_index
+        
+        # 创建新章节
         po = ChapterPO(**entity.__dict__)
         res = self.repository.create(po)
 
@@ -53,7 +76,6 @@ class ChapterService:
         data = {k: v for k, v in res.__dict__.items() if not k.startswith("_")}
         entity = ChapterEntity(**data)
 
-        # 将po转化为entity
         return entity
 
 
@@ -166,6 +188,225 @@ class ChapterService:
         result = result.replace("{novel_content}", novel_content)
         return result
 
+    def _is_plain_narrator_role(self, role_name: str) -> bool:
+        role = (role_name or "").strip()
+        return role in {"旁白", "旁白:", "旁白："}
+
+    def _is_perspective_narrator_role(self, role_name: str) -> bool:
+        role = (role_name or "").strip()
+        return role.startswith("旁白-") and role.endswith("视角")
+
+    def _canonicalize_narrator_role(self, role_name: str) -> str:
+        """将旁白角色名归一化为 `旁白-<角色名>视角`，纯旁白返回 `旁白`。"""
+        raw_role = (role_name or "").strip()
+        if not raw_role:
+            return raw_role
+
+        if self._is_plain_narrator_role(raw_role):
+            return "旁白"
+
+        compact = re.sub(r"\s+", "", raw_role)
+        if "旁白" not in compact:
+            return raw_role
+
+        if "视角" not in compact:
+            if compact in {"旁白", "旁白:", "旁白："}:
+                return "旁白"
+            return raw_role
+
+        perspective = None
+
+        # 形式1：旁白-林凡视角 / 旁白：林凡视角 / 旁白林凡视角
+        if compact.startswith("旁白"):
+            m = re.match(r"^旁白[-:：_]*([^:：_\-]+?)视角$", compact)
+            if m:
+                perspective = m.group(1)
+
+        # 形式2：林凡视角旁白 / 林凡视角-旁白
+        if perspective is None and compact.endswith("旁白"):
+            m = re.match(r"^([^:：_\-]+?)视角[-:：_]*旁白$", compact)
+            if m:
+                perspective = m.group(1)
+
+        # 兜底：只要含有“视角”和“旁白”，尽量提取“视角”前文本。
+        if perspective is None:
+            m = re.search(r"([^:：_\-]+?)视角", compact)
+            if m:
+                perspective = m.group(1)
+
+        if perspective:
+            if perspective in {"未知", "不明", "无"}:
+                perspective = "未知"
+            return f"旁白-{perspective}视角"
+
+        return "旁白"
+
+    def _infer_narrator_perspective(self, text_content: str, candidate_roles: List[str],
+                                    prev_role: str = None, next_role: str = None) -> str:
+        text = text_content or ""
+
+        # 只在真实角色里做匹配，不把旁白类角色作为候选视角。
+        filtered_roles = [
+            (role or "").strip()
+            for role in (candidate_roles or [])
+            if role and not str(role).strip().startswith("旁白")
+        ]
+
+        # 优先使用文本中显式出现次数最多的角色名作为视角。
+        if text and filtered_roles:
+            unique_roles = sorted(set(filtered_roles), key=len, reverse=True)
+            best_role = None
+            best_count = 0
+            for role in unique_roles:
+                count = text.count(role)
+                if count > best_count:
+                    best_role = role
+                    best_count = count
+            if best_role and best_count > 0:
+                return best_role
+
+        # 次优先用邻近台词角色兜底，保证同一语境中的视角一致性。
+        for nearby in [prev_role, next_role]:
+            nearby_role = (nearby or "").strip()
+            if nearby_role and not self._is_plain_narrator_role(nearby_role) and not self._is_perspective_narrator_role(
+                    nearby_role):
+                return nearby_role
+
+        return "未知"
+
+    def _normalize_narrator_roles(self, parsed_data: list, candidate_roles: List[str]) -> list:
+        if not isinstance(parsed_data, list):
+            return parsed_data
+
+        normalized = []
+        for idx, item in enumerate(parsed_data):
+            if not isinstance(item, dict):
+                normalized.append(item)
+                continue
+
+            role_name = (item.get("role_name") or "").strip()
+            canonical_role = self._canonicalize_narrator_role(role_name)
+
+            # 非旁白类角色不处理。
+            if "旁白" not in canonical_role:
+                normalized.append(item)
+                continue
+
+            # 已是可用视角旁白，直接归一化写回。
+            if self._is_perspective_narrator_role(canonical_role):
+                new_item = item.copy()
+                new_item["role_name"] = canonical_role
+                normalized.append(new_item)
+                continue
+
+            prev_role = None
+            for j in range(idx - 1, -1, -1):
+                prev_item = parsed_data[j]
+                if isinstance(prev_item, dict):
+                    prev_role = self._canonicalize_narrator_role((prev_item.get("role_name") or "").strip())
+                    if prev_role:
+                        break
+
+            next_role = None
+            for j in range(idx + 1, len(parsed_data)):
+                next_item = parsed_data[j]
+                if isinstance(next_item, dict):
+                    next_role = self._canonicalize_narrator_role((next_item.get("role_name") or "").strip())
+                    if next_role:
+                        break
+
+            perspective = self._infer_narrator_perspective(
+                item.get("text_content", ""),
+                candidate_roles or [],
+                prev_role,
+                next_role,
+            )
+            new_item = item.copy()
+            new_item["role_name"] = f"旁白-{perspective}视角"
+            normalized.append(new_item)
+
+        return normalized
+
+    def _split_sentences_for_postprocess(self, text: str) -> List[str]:
+        """按句号/问号/感叹号/分号/换行切分为句，保留完整句。"""
+        if not text:
+            return []
+
+        normalized = text.replace("\r\n", "\n").replace("\r", "\n")
+        sentences = []
+        buffer = ""
+
+        for ch in normalized:
+            if ch == "\n":
+                if buffer.strip():
+                    sentences.append(buffer.strip())
+                buffer = ""
+                continue
+
+            buffer += ch
+            if ch in "。！？!?；;":
+                if buffer.strip():
+                    sentences.append(buffer.strip())
+                buffer = ""
+
+        if buffer.strip():
+            sentences.append(buffer.strip())
+
+        return sentences
+
+    def _split_text_by_sentence_target(self, text: str, target_len: int = 50) -> List[str]:
+        """尽量控制在 target_len 左右，优先保证完整句；单句过长则保留原句。"""
+        text = (text or "").strip()
+        if not text:
+            return []
+
+        sentences = self._split_sentences_for_postprocess(text)
+        if not sentences:
+            return [text]
+
+        segments = []
+        current = ""
+
+        for sentence in sentences:
+            if not current:
+                current = sentence
+                continue
+
+            if len(current) + len(sentence) <= target_len:
+                current += sentence
+            else:
+                segments.append(current.strip())
+                current = sentence
+
+        if current.strip():
+            segments.append(current.strip())
+
+        return segments
+
+    def _split_parsed_lines_by_sentence_target(self, parsed_data: list, target_len: int = 50) -> list:
+        """后处理切分：同角色也切分，但不在句中硬切。"""
+        if not isinstance(parsed_data, list):
+            return parsed_data
+
+        result = []
+        for item in parsed_data:
+            if not isinstance(item, dict):
+                result.append(item)
+                continue
+
+            text_content = item.get("text_content", "")
+            chunks = self._split_text_by_sentence_target(text_content, target_len)
+            if len(chunks) <= 1:
+                result.append(item)
+                continue
+
+            for chunk in chunks:
+                new_item = item.copy()
+                new_item["text_content"] = chunk
+                result.append(new_item)
+
+        return result
+
     def para_content(self, prompt:str,chapter_id: int,content: str = None,role_names: List[str] = None,emotion_names: List[str] = None,strength_names: List[str] = None,is_precise_fill: int = 0):
         db = SessionLocal()
         try :
@@ -215,6 +456,12 @@ class ChapterService:
                     print("开始自动填充")
                     corrector = TextCorrectorFinal()
                     parsed_data = corrector.correct_ai_text(content, parsed_data)
+
+                # 严格后处理：将 LLM 误输出的“旁白”统一改写为带视角的旁白角色。
+                parsed_data = self._normalize_narrator_roles(parsed_data, role_names)
+
+                # 严格后处理：按完整句切分长台词，目标长度约 50 字。
+                parsed_data = self._split_parsed_lines_by_sentence_target(parsed_data, target_len=50)
 
                 # parsed_data = json.loads(result)
                 # 构造 List[LineInitDTO]

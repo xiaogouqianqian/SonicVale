@@ -174,7 +174,7 @@ class TextCorrectorFinal:
                     if missing_sentence:
                         print(f"  -> 插入遗漏句子: '{missing_sentence}'")
                         final_data.append({
-                            'role_name': '旁白',
+                            'role_name': '旁白-未知视角',
                             'text_content': missing_sentence,
                             'emotion_name': '',
                             'strength_name': ''

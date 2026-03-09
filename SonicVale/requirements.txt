@@ -10,3 +10,5 @@ soundfile==0.13.1
 SQLAlchemy==2.0.44
 starlette==0.48.0
 uvicorn==0.37.0
+ebooklib==0.19.1
+beautifulsoup4==4.12.2

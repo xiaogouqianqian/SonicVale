@@ -1,4 +1,5 @@
 import requests
+import json
 from sqlalchemy import Sequence
 
 from app.entity.tts_provider_entity import TTSProviderEntity
@@ -34,7 +35,9 @@ class TTSProviderService:
         - 检查同名冲突
         - 检查project_id不能改变
         """
-        name = data["name"]
+        name = data.get("name")
+        if not name:
+            return False
         if self.repository.get_by_name(name) and self.repository.get_by_name(name).id != tts_provider_id:
             return False
         self.repository.update(tts_provider_id, data)
@@ -49,11 +52,31 @@ class TTSProviderService:
     def create_default_tts_provider(self):
         """创建默认的tts供应商"""
         if self.repository.get_by_name("index_tts") :
-            return
-        if self.repository.get_by_id(1) :
-            return
-        po = TTSProviderPO(name="index_tts", id=1,status=1, api_base_url="", api_key="")
-        self.repository.create(po)
+            pass
+        elif not self.repository.get_by_id(1):
+            po = TTSProviderPO(name="index_tts", id=1, status=1, api_base_url="", api_key="", custom_params=None)
+            self.repository.create(po)
+
+        if not self.repository.get_by_name("gptsovits_inference") and not self.repository.get_by_id(2):
+            default_params = json.dumps(
+                {
+                    "engine_type": "gptsovits_inference",
+                    "project_path": "",
+                    "text_language": "中文",
+                    "default_format": "wav",
+                    "default_speed": 1.0,
+                },
+                ensure_ascii=False,
+            )
+            po = TTSProviderPO(
+                name="gptsovits_inference",
+                id=2,
+                status=1,
+                api_base_url="http://127.0.0.1:5000",
+                api_key="",
+                custom_params=default_params,
+            )
+            self.repository.create(po)
 
     def test_tts_provider(self, entity: TTSProviderEntity):
         # 拿到url
@@ -63,12 +86,16 @@ class TTSProviderService:
         # ping api
         # 调用
         try:
-            resp = requests.get(api_base_url, timeout=5)
+            is_gpt_sovits = (entity.name or "").lower() == "gptsovits_inference"
+            test_url = f"{api_base_url.rstrip('/')}/character_list" if is_gpt_sovits else api_base_url
+            resp = requests.get(test_url, timeout=5)
 
             # 如果返回 200-399 都认为是通的（有些服务会 302 重定向）
             if 200 <= resp.status_code < 400:
                 try:
                     data = resp.json()
+                    if is_gpt_sovits:
+                        return isinstance(data, dict)
                     if "endpoints" in data:
                         return True
                     else:

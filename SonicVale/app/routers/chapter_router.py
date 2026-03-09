@@ -10,7 +10,7 @@ from typing import List
 
 
 from sqlalchemy.orm import Session
-from fastapi import APIRouter, Depends, HTTPException, Form
+from fastapi import APIRouter, Depends, HTTPException, Form, Body
 
 
 from app.core.response import Res
@@ -94,13 +94,13 @@ async def create_chapter(dto: ChapterCreateDTO, chapter_service: ChapterService 
     """创建章节"""
     try:
         # DTO → Entity
-        entity = ChapterEntity(**dto.__dict__)
+        entity = ChapterEntity(**{k: v for k, v in dto.__dict__.items() if k != 'after_chapter_id'})
         # 判断project_id是否存在
         project = project_service.get_project(dto.project_id)
         if project is None:
             return Res(data=None, code=400, message=f"项目 '{dto.project_id}' 不存在")
-        # 调用 Service 创建项目（返回 True/False）
-        entityRes = chapter_service.create_chapter(entity)
+        # 调用 Service 创建项目（返回 True/False），传入 after_chapter_id
+        entityRes = chapter_service.create_chapter(entity, dto.after_chapter_id)
 
         # 返回统一 Response
         if entityRes is not None:
@@ -181,6 +181,10 @@ async def get_lines(
     prompt_service: PromptService = Depends(get_prompt_service),
     project_service: ProjectService = Depends(get_project_service)
 ):
+    """调用 LLM 生成台词并追加到数据库。
+    不会删除已有台词，会产生一个新的 batch_tag 供前端区分。
+    返回值中暂时不携带 batch_tag，前端可以再调用后台的 list-batches 接口。
+    """
     # 判断章节内容是否存在
     chapter = chapter_service.get_chapter(chapter_id)
     if chapter.text_content is None:
@@ -220,6 +224,9 @@ async def get_lines(
     if prompt is None:
         return Res(data=None, code=500, message="提示词不存在")
 
+    # 生成新的批次标签（按顺序 1, 2, 3...）
+    batch_tag = line_service.get_next_batch_number(chapter_id)
+
     for idx, content in enumerate(contents):
         logging.info(f"解析第 {idx + 1}/{len(contents)} 段...")
 
@@ -254,13 +261,59 @@ async def get_lines(
         audio_path = os.path.join(project.project_root_path,str(project_id),str(chapter_id),"audio")
         os.makedirs(audio_path, exist_ok=True)
         line_service.update_init_lines(
-            all_line_data, project_id, chapter_id, emotions_dict, strengths_dict,audio_path
+            all_line_data, project_id, chapter_id, emotions_dict, strengths_dict, audio_path, batch_tag
         )
     except Exception as e:
         logging.error(f"写入数据库失败: {e}\n{traceback.format_exc()}")
         return Res(data=None, code=500, message="写入数据库失败")
 
-    return Res(data=None, code=200, message="解析成功")
+    # ✅ 返回新生成的批次号，供前端自动跳转
+    return Res(data=batch_tag, code=200, message="解析成功")
+
+
+# 批量生成台词：按顺序处理多个章节，返回时不附带各自内容，只报告完成状态
+@router.post(
+    "/batch-get-lines/{project_id}",
+    response_model=Res[str],
+    summary="批量调用LLM生成台词",
+    description="传入章节ID列表，按照顺序依次执行get_lines逻辑并追加台词"
+)
+async def batch_get_lines(
+    project_id: int,
+    chapter_ids: List[int] = Body(...),
+    chapter_service: ChapterService = Depends(get_chapter_service),
+    line_service: LineService = Depends(get_line_service),
+    role_service: RoleService = Depends(get_role_service),
+    emotion_service: EmotionService = Depends(get_emotion_service),
+    strength_service: StrengthService = Depends(get_strength_service),
+    prompt_service: PromptService = Depends(get_prompt_service),
+    project_service: ProjectService = Depends(get_project_service)
+):
+    for cid in chapter_ids:
+        # reuse existing handler by calling it directly or duplicating simple part
+        res = await get_lines(
+            project_id, cid,
+            chapter_service, line_service, role_service,
+            emotion_service, strength_service,
+            prompt_service, project_service
+        )
+        if res.code != 200:
+            return Res(data=None, code=res.code, message=f"章节 {cid} 出错：{res.message}")
+    return Res(data=None, code=200, message="批量生成完成")
+
+# 列出某章节的所有生成批次
+@router.get(
+    "/list-batches/{chapter_id}",
+    response_model=Res[List[str]],
+    summary="获取章节下存在的批次标签",
+    description="用于前端展示已有的解析批次"
+)
+async def list_batches(
+    chapter_id: int,
+    line_service: LineService = Depends(get_line_service)
+):
+    tags = line_service.list_batches(chapter_id)
+    return Res(data=tags, code=200, message="查询成功")
 
 
 # 导出LLM prompt指令

@@ -35,6 +35,8 @@ class LineCreateDTO(BaseModel):
     emotion_id: Optional[int] = None
     strength_id: Optional[int] = None
 
+    batch_tag: Optional[str] = None
+
     audio_path : Optional[str] = None
     status : Optional[str] = None
     is_done : Optional[int] = 0
@@ -50,6 +52,8 @@ class LineResponseDTO(BaseModel):
 
     emotion_id: Optional[int] = None
     strength_id: Optional[int] = None
+
+    batch_tag: Optional[str] = None
 
     audio_path : Optional[str] = None
     status : Optional[str] = None

@@ -28,7 +28,9 @@
     ],
     "win": {
       "icon": "resource/icon/yingu.ico",
-      "target": "nsis"
+      "target": "nsis",
+      "signAndEditExecutable": false,
+      "verifyUpdateCodeSignature": false
     },
     "nsis": {
       "oneClick": false,

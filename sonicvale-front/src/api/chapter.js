@@ -10,10 +10,11 @@ export function getChapterDetail(chapterId) {
 }
 
 
-export function createChapter(title, projectId) {
+export function createChapter(title, projectId, afterChapterId = null) {
   return request.post('/chapters', {
     title,
-    project_id: projectId
+    project_id: projectId,
+    after_chapter_id: afterChapterId
   })
 }
 
@@ -29,6 +30,12 @@ export function deleteChapter(chapterId) {
 
 export function splitChapterByLLM(projectId, chapterId) {
   return request.get(`/chapters/get-lines/${projectId}/${chapterId}`)
+}
+
+// 批量拆分多个章节（传入数组）
+export function batchSplitByLLM(projectId, chapterIds) {
+  // POST /chapters/batch-get-lines/{project_id}
+  return request.post(`/chapters/batch-get-lines/${projectId}`, chapterIds)
 }
 
 
