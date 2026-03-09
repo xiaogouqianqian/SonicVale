@@ -182,13 +182,22 @@ def batch_update_line_order(
     return Res(data=res, code=200, message="更新成功")
 
 # 完成配音时候，更新音频路径，保证顺序一致
-@router.put("/{line_id}/audio_path", response_model=Res[bool])
+@router.put("/{line_id}/audio_path", response_model=Res[dict])
 def update_line_audio_path(
         line_id: int,
-    dto: LineCreateDTO,  # 关键：明确从 body 读取“数组”
+    dto: LineCreateDTO,  # 关键：明确从 body 读取"数组"
     line_service: LineService = Depends(get_line_service),
 ):
     res = line_service.update_audio_path(line_id,dto)
+    
+    # 新的返回格式包含 success 和 message
+    if isinstance(res, dict):
+        if res.get("success"):
+            return Res(data=res, code=200, message=res.get("message", "更新成功"))
+        else:
+            return Res(data=res, code=400, message=res.get("message", "更新失败"))
+    
+    # 兼容旧的布尔返回值
     if not res:
         return Res(data=None, code=400, message="更新失败")
     return Res(data=res, code=200, message="更新成功")
@@ -308,8 +317,18 @@ async def process_audio(line_id: int, dto: LineAudioProcessDTO, line_service: Li
 @router.get("/export-audio/{chapter_id}")
 async def export_audio(chapter_id: int,
                        single: bool = Query(False, description="是否导出单条音频字幕"),
+                       generate_subtitle: bool = Query(True, description="是否生成字幕"),
                        line_service: LineService = Depends(get_line_service)):
-    res = line_service.export_audio(chapter_id, single)
+    res = line_service.export_audio(chapter_id, single, generate_subtitle)
+    
+    # 新的返回格式包含 success 字段
+    if isinstance(res, dict):
+        if res.get("success"):
+            return Res(data=res, code=200, message=res.get("message", "导出成功"))
+        else:
+            return Res(data=res, code=400, message=res.get("message", "导出失败"))
+    
+    # 兼容旧的布尔返回值
     if not res:
         return Res(data=None, code=400, message="导出失败")
     return Res(data=res, code=200, message="导出成功")

@@ -61,10 +61,10 @@ export function processAudio(line_id, payload) {
 }
 
 // 导出结果和字幕
-// 导出接口，带 single 参数
-export function exportLines(chapter_id, single = false) {
+// 导出接口，带 single 和 generate_subtitle 参数
+export function exportLines(chapter_id, single = false, generate_subtitle = true) {
   return request.get(`/lines/export-audio/${chapter_id}`, {
-    params: { single }
+    params: { single, generate_subtitle }
   })
 }
 

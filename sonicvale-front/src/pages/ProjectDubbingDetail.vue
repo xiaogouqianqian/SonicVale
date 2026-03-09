@@ -2239,6 +2239,8 @@ async function markAllAsCompleted() {
 
     // —— 阶段 1：全部先加 temp_ 前缀 —— //
     let ok1 = 0, skip1 = 0, fail1 = 0
+    const errors1 = []  // 记录错误信息
+    
     for (const line of list) {
         if (!line.audio_path) { skip1++; continue }
         const base = /[^/\\]+$/.exec(line.audio_path)?.[0] || ''
@@ -2258,10 +2260,14 @@ async function markAllAsCompleted() {
                 ok1++
             } else {
                 fail1++
+                const errMsg = res?.message || res?.data?.message || '未知错误'
+                errors1.push(`台词#${line.id}(序号${line.line_order}): ${errMsg}`)
                 console.error(`阶段1失败 line#${line.id}:`, res)
             }
         } catch (e) {
             fail1++
+            const errMsg = e?.response?.data?.message || e?.message || e.toString()
+            errors1.push(`台词#${line.id}(序号${line.line_order}): ${errMsg}`)
             console.error(`阶段1异常 line#${line.id}:`, e?.response?.data || e)
         }
     }
@@ -2269,6 +2275,7 @@ async function markAllAsCompleted() {
     // —— 阶段 2：按 line_order 重命名为 index{line_order}.wav —— //
     loading.setText('正在批量修改 audio_path（阶段 2/3）...')
     let ok2 = 0, skip2 = 0, fail2 = 0
+    const errors2 = []  // 记录错误信息
 
     for (const line of list) {
         if (!line.audio_path) { skip2++; continue }
@@ -2304,10 +2311,14 @@ async function markAllAsCompleted() {
                 ok2++
             } else {
                 fail2++
+                const errMsg = res?.message || res?.data?.message || '未知错误'
+                errors2.push(`台词#${line.id}(序号${line.line_order}): ${errMsg}`)
                 console.error(`阶段2失败 line#${line.id}:`, res)
             }
         } catch (e) {
             fail2++
+            const errMsg = e?.response?.data?.message || e?.message || e.toString()
+            errors2.push(`台词#${line.id}(序号${line.line_order}): ${errMsg}`)
             console.error(`阶段2异常 line#${line.id}:`, e?.response?.data || e)
         }
     }
@@ -2317,9 +2328,17 @@ async function markAllAsCompleted() {
     const msg1 = `阶段1：成功 ${ok1}，跳过 ${skip1}，失败 ${fail1}`
     const msg2 = `阶段2：成功 ${ok2}，跳过 ${skip2}，失败 ${fail2}`
 
-    if (fail1 === 0 && fail2 === 0) {
-        // 所有重命名成功，进入导出
-        loading.setText('正在导出音频与字幕（阶段 3/3）...')
+    // 只要有成功重命名的台词，就继续导出（允许部分失败）
+    const hasValidAudio = (ok1 > 0 || ok2 > 0 || (skip1 > 0 && fail1 < total))
+    
+    if (hasValidAudio) {
+        // 有可导出的台词，进入导出阶段
+        const hasFailures = (fail1 > 0 || fail2 > 0)
+        if (hasFailures) {
+            loading.setText(`正在导出音频与字幕（阶段 3/3）...\n注意：有 ${fail1 + fail2} 条台词失败将被跳过`)
+        } else {
+            loading.setText('正在导出音频与字幕（阶段 3/3）...')
+        }
 
         try {
             let isExportSingleSubtitle = false
@@ -2341,39 +2360,106 @@ async function markAllAsCompleted() {
                 // 用户点击了“否” 或者关闭
                 isExportSingleSubtitle = false
             }
-            const expRes = await lineAPI.exportLines(activeChapterId.value, isExportSingleSubtitle)
-
-            // 如果你有单独的字幕导出接口，可按需增加：
-            // const srtRes = (typeof lineAPI.exportSubtitles === 'function')
-            //   ? await lineAPI.exportSubtitles(activeChapterId.value)
-            //   : null
+            
+            // 询问是否生成字幕
+            let exportSubtitle = true
+            try {
+                await ElMessageBox.confirm(
+                    '是否生成字幕文件？<br><span style="color:#999;">（字幕生成需要语音识别，会增加导出时间）</span>',
+                    '导出设置 - 字幕',
+                    {
+                        dangerouslyUseHTMLString: true,
+                        confirmButtonText: '生成字幕',
+                        cancelButtonText: '仅音频',
+                        type: 'info'
+                    }
+                )
+                exportSubtitle = true
+            } catch {
+                exportSubtitle = false
+            }
+            
+            const expRes = await lineAPI.exportLines(activeChapterId.value, isExportSingleSubtitle, exportSubtitle)
 
             const data = expRes?.data || {}
-            // 尝试从返回体里拿关键信息（字段名以你后端为准）
-            const audioOut = data.audio_zip_path || data.audio_zip || data.audio_path || data.audio
-            const srtOut = data.subtitle_zip_path || data.srt_zip || data.subtitles_zip || data.srt
+            
+            // 获取导出结果的详细信息
+            const exportedCount = data.exported || 0
+            const skippedCount = data.skipped || 0
+            const totalCount = data.total || 0
+            const outputPath = data.output_path || ''
+            const subtitlePath = data.subtitle_path || ''
+            
+            // 构建导出消息
+            let exportMsg = `导出完成：成功导出 ${exportedCount}/${totalCount} 条音频`
+            if (skippedCount > 0) {
+                exportMsg += `（跳过 ${skippedCount} 条未生成的台词）`
+            }
+            if (exportSubtitle && subtitlePath) {
+                exportMsg += ` + 字幕`
+            } else if (!exportSubtitle) {
+                exportMsg += `（未生成字幕）`
+            }
 
             // 在 Loading 里展示导出结果摘要
+            const hasRenameFailures = (fail1 > 0 || fail2 > 0)
             loading.setText(
                 `导出完成（阶段 3/3）：\n` +
-                `- 音频：${audioOut ? audioOut : '已导出'}\n` +
-                `- 字幕：${srtOut ? srtOut : '已导出'}\n` +
+                `- 音频：已导出 ${exportedCount} 条\n` +
+                (exportSubtitle ? `- 字幕：${subtitlePath ? '已生成' : '生成失败'}\n` : `- 字幕：未生成（用户跳过）\n`) +
+                (skippedCount > 0 ? `- 跳过：${skippedCount} 条未生成音频\n` : '') +
+                (hasRenameFailures ? `- 重命名失败：${fail1 + fail2} 条\n` : '') +
                 `${msg1}；${msg2}`
             )
 
-            // 友好提示
-            ElMessage.success(`全部完成（共 ${total} 条）。${msg1}；${msg2}；导出成功`)
+            // 友好提示 - 如果有重命名失败，显示 warning；否则根据跳过数量决定
+            const messageType = hasRenameFailures ? 'warning' : (skippedCount > 0 ? 'warning' : 'success')
+            const statusText = hasRenameFailures ? '部分完成' : '全部完成'
+            ElMessage[messageType](
+                `${statusText}（共 ${total} 条）。${msg1}；${msg2}；${exportMsg}`
+            )
         } catch (e) {
             console.error('导出失败：', e)
-            loading.setText(`导出失败（阶段 3/3）。${msg1}；${msg2}`)
-            ElMessage.warning(`重命名成功，但导出失败。${msg1}；${msg2}`)
+            const errorMsg = e?.response?.data?.message || e?.message || e.toString()
+            loading.setText(`导出失败（阶段 3/3）：${errorMsg}\n${msg1}；${msg2}`)
+            ElMessage.error(`导出失败：${errorMsg}`)
         } finally {
             loading.close()
         }
     } else {
-        // 有失败就不做导出
+        // 没有任何可导出的音频
         loading.close()
-        ElMessage.warning(`部分失败。${msg1}；${msg2}（详见控制台）`)
+        
+        // 构建详细的错误信息
+        let errorDetails = `${msg1}；${msg2}\n\n没有任何可导出的音频（所有台词都失败或跳过）\n\n`
+        
+        if (errors1.length > 0) {
+            errorDetails += `阶段1失败详情：\n${errors1.slice(0, 5).join('\n')}`
+            if (errors1.length > 5) {
+                errorDetails += `\n... 还有 ${errors1.length - 5} 个错误`
+            }
+            errorDetails += '\n\n'
+        }
+        
+        if (errors2.length > 0) {
+            errorDetails += `阶段2失败详情：\n${errors2.slice(0, 5).join('\n')}`
+            if (errors2.length > 5) {
+                errorDetails += `\n... 还有 ${errors2.length - 5} 个错误`
+            }
+        }
+        
+        errorDetails += '\n\n提示：请先为这些台词生成音频后再导出'
+        
+        console.error('重命名失败详情：')
+        console.error('阶段1错误：', errors1)
+        console.error('阶段2错误：', errors2)
+        
+        // 使用 MessageBox 显示详细错误
+        ElMessageBox.alert(errorDetails, '无法导出：所有音频文件缺失', {
+            confirmButtonText: '确定',
+            type: 'warning',
+            customClass: 'error-detail-box'
+        })
     }
 
     // —— 自动打开输出文件夹 —— //

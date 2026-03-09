@@ -189,35 +189,42 @@ class LineService:
             self.update_line(line_order.id,{"line_order":line_order.line_order})
         return True
 
-    def update_audio_path(self, id, dto) -> bool:
+    def update_audio_path(self, id, dto):
+        """更新音频路径，返回 {success: bool, message: str}"""
         try:
             po = self.get_line(id)
+            if not po:
+                return {"success": False, "message": f"台词ID {id} 不存在"}
+            
             old_path = po.audio_path
             new_path = dto.audio_path
 
             if not old_path:
-                return False  # 原始路径为空
+                return {"success": False, "message": "原始音频路径为空，无法重命名"}
 
             if not os.path.exists(old_path):
-                return False  # 原始文件不存在
+                return {"success": False, "message": f"原始音频文件不存在: {old_path}"}
 
             if os.path.exists(new_path):
-                return False  # 目标文件已存在，避免覆盖
+                return {"success": False, "message": f"目标文件已存在，避免覆盖: {new_path}"}
 
             # 确保目标目录存在
             os.makedirs(os.path.dirname(new_path), exist_ok=True)
 
             # 重命名文件
             shutil.move(old_path, new_path)
+            print(f"[重命名成功] {old_path} -> {new_path}")
 
             # 更新数据库
             self.update_line(id, {"audio_path": new_path})
-            return True
+            return {"success": True, "message": "更新成功"}
 
         except Exception as e:
-            # 可选：记录日志
-            print(f"[update_audio_path] 失败: {e}")
-            return False
+            error_msg = f"重命名失败: {str(e)}"
+            print(f"[update_audio_path] {error_msg}")
+            import traceback
+            traceback.print_exc()
+            return {"success": False, "message": error_msg}
 
     def process_audio_ffmpeg(
             self,
@@ -599,42 +606,100 @@ class LineService:
         wb.save(file_path)
         return file_path
 
-    def export_audio(self, chapter_id,single=False):
+    def export_audio(self, chapter_id, single=False, generate_subtitle=True):
         # 拿到所有的台词
         lines = self.repository.get_all(chapter_id)
-
-        paths = [line.audio_path for line in lines]
-        if len(paths) > 0:
-            # 把paths[0]的path去掉后面的文件名，得到文件夹路径
-            output_dir_path = os.path.join(os.path.dirname(paths[0]), "result")
-            # 不存在就创建
-            os.makedirs(output_dir_path, exist_ok=True)
-            # 放到result目录下，名字叫项目名称_章节名称.wav
+        
+        # 过滤出已生成且文件实际存在的音频
+        valid_lines = []
+        valid_paths = []
+        skipped_count = 0
+        
+        for line in lines:
+            if line.audio_path and os.path.exists(line.audio_path):
+                valid_lines.append(line)
+                valid_paths.append(line.audio_path)
+            else:
+                skipped_count += 1
+                print(f"[导出跳过] 台词ID {line.id} 未生成音频或文件不存在: {line.audio_path}")
+        
+        # 如果没有任何可导出的音频
+        if len(valid_paths) == 0:
+            print(f"[导出失败] 章节 {chapter_id} 没有任何已生成的音频")
+            return {
+                "success": False,
+                "message": "没有可导出的音频，请先生成台词音频",
+                "total": len(lines),
+                "exported": 0,
+                "skipped": skipped_count
+            }
+        
+        # 确定输出目录（使用第一个有效音频的路径）
+        output_dir_path = os.path.join(os.path.dirname(valid_paths[0]), "result")
+        os.makedirs(output_dir_path, exist_ok=True)
+        
+        try:
+            # 合并已生成的音频
             output_path = os.path.join(output_dir_path, "result.wav")
-            self.concat_wav_files(paths, output_path)
-            # 生成字幕
-            output_subtitle_path = os.path.join(output_dir_path, "result.srt")
-            subtitle_engine.generate_subtitle(output_path,output_subtitle_path)
-
-
-            if single:
-                # 生成所有的单条字幕
-                subtitle_dir_path = os.path.join(os.path.dirname(paths[0]), "subtitles")
-                # 先清空这个文件夹
-                shutil.rmtree(subtitle_dir_path, ignore_errors=True)
-                os.makedirs(subtitle_dir_path, exist_ok=True)
-                for line in lines:
+            print(f"[开始合并] 合并 {len(valid_paths)} 个音频文件到: {output_path}")
+            self.concat_wav_files(valid_paths, output_path)
+            print(f"[合并完成] 输出文件: {output_path}")
+            
+            # 生成字幕（根据参数决定）
+            output_subtitle_path = None
+            if generate_subtitle:
+                output_subtitle_path = os.path.join(output_dir_path, "result.srt")
+                print(f"[开始生成字幕] {output_subtitle_path}")
+                subtitle_engine.generate_subtitle(output_path, output_subtitle_path)
+                print(f"[字幕生成完成] {output_subtitle_path}")
+            else:
+                print(f"[跳过字幕生成] 用户选择仅导出音频")
+            
+        except Exception as e:
+            print(f"[导出失败] 合并音频或生成字幕时出错: {e}")
+            import traceback
+            traceback.print_exc()
+            return {
+                "success": False,
+                "message": f"导出失败: {str(e)}",
+                "total": len(lines),
+                "exported": 0,
+                "skipped": skipped_count
+            }
+        
+        # 单条字幕导出（只处理有效音频，且用户选择了生成字幕）
+        if single and generate_subtitle:
+            subtitle_dir_path = os.path.join(os.path.dirname(valid_paths[0]), "subtitles")
+            shutil.rmtree(subtitle_dir_path, ignore_errors=True)
+            os.makedirs(subtitle_dir_path, exist_ok=True)
+            
+            for line in valid_lines:
+                try:
                     path = line.audio_path
                     base_name = os.path.splitext(os.path.basename(path))[0]
                     subtitle_path = os.path.join(subtitle_dir_path, base_name + ".srt")
-                    subtitle_engine.generate_subtitle(path,subtitle_path)
-                    #     将subtitle_path写进line.subtitle_path
-                    self.repository.update(line.id,{"subtitle_path":subtitle_path})
-            # 导出所有数据
+                    subtitle_engine.generate_subtitle(path, subtitle_path)
+                    self.repository.update(line.id, {"subtitle_path": subtitle_path})
+                except Exception as e:
+                    print(f"[单条字幕生成失败] 台词ID {line.id}: {e}")
+        
+        # 导出所有数据（包含所有台词，方便查看哪些未生成）
+        try:
             self.export_lines_to_excel(lines, os.path.join(output_dir_path, "all_lines.xlsx"))
-            return True
-        else:
-            return False
+        except Exception as e:
+            print(f"[Excel导出失败] {e}")
+        
+        print(f"[导出成功] 共 {len(lines)} 条台词，成功导出 {len(valid_paths)} 条，跳过 {skipped_count} 条")
+        
+        return {
+            "success": True,
+            "message": f"导出成功！已导出 {len(valid_paths)} 条音频" + (f"，跳过 {skipped_count} 条未生成的台词" if skipped_count > 0 else ""),
+            "total": len(lines),
+            "exported": len(valid_paths),
+            "skipped": skipped_count,
+            "output_path": output_path,
+            "subtitle_path": output_subtitle_path
+        }
 
 
 
