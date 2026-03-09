@@ -2341,27 +2341,7 @@ async function markAllAsCompleted() {
         }
 
         try {
-            let isExportSingleSubtitle = false
-            try {
-                await ElMessageBox.confirm(
-                    '是否额外导出所有的单条字幕？<br><span style="color:#999;">（额外导出会增加音频导出时间，推荐选择“否”）</span>',
-                    '导出设置',
-                    {
-                        dangerouslyUseHTMLString: true, // 允许用 HTML 格式
-                        confirmButtonText: '是',
-                        cancelButtonText: '否',
-                        type: 'info',
-                        cancelButtonClass: 'el-button--danger'    // 「否」= 蓝色重点按钮
-                    }
-                )
-                // 用户点击了“是”
-                isExportSingleSubtitle = true
-            } catch {
-                // 用户点击了“否” 或者关闭
-                isExportSingleSubtitle = false
-            }
-            
-            // 询问是否生成字幕
+            // 先询问是否生成字幕
             let exportSubtitle = true
             try {
                 await ElMessageBox.confirm(
@@ -2378,7 +2358,28 @@ async function markAllAsCompleted() {
             } catch {
                 exportSubtitle = false
             }
-            
+
+            // 只有选择生成字幕时，才继续询问是否导出单条字幕
+            let isExportSingleSubtitle = false
+            if (exportSubtitle) {
+                try {
+                    await ElMessageBox.confirm(
+                        '是否额外导出所有的单条字幕？<br><span style="color:#999;">（额外导出会增加音频导出时间，推荐选择“否”）</span>',
+                        '导出设置 - 单条字幕',
+                        {
+                            dangerouslyUseHTMLString: true,
+                            confirmButtonText: '是',
+                            cancelButtonText: '否',
+                            type: 'info',
+                            cancelButtonClass: 'el-button--danger'
+                        }
+                    )
+                    isExportSingleSubtitle = true
+                } catch {
+                    isExportSingleSubtitle = false
+                }
+            }
+
             const expRes = await lineAPI.exportLines(activeChapterId.value, isExportSingleSubtitle, exportSubtitle)
 
             const data = expRes?.data || {}
