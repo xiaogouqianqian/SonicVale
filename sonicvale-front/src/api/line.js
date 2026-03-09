@@ -68,6 +68,10 @@ export function exportLines(chapter_id, single = false, generate_subtitle = true
   })
 }
 
+export function mergeAudios(data) {
+  return request.post('/lines/merge-audios', data)
+}
+
 
 // 矫正字幕
 export function correctLines(chapter_id) {

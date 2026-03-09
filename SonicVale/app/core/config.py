@@ -1,6 +1,6 @@
 import os
-
-import os, sys
+import shutil
+import sys
 from pathlib import Path
 # 得到默认配置文件
 def getConfigPath():
@@ -15,6 +15,19 @@ def getConfigPath():
     return user_dir
 
 def getFfmpegPath():
-    BASE_DIR = getattr(sys, "_MEIPASS", Path(os.path.abspath(".")))
-    FFMPEG_PATH = os.path.join(BASE_DIR, "core", "ffmpeg", "ffmpeg.exe")
-    return FFMPEG_PATH
+    base_dir = Path(getattr(sys, "_MEIPASS", Path(os.path.abspath("."))))
+    candidates = [
+        base_dir / "app" / "core" / "ffmpeg" / "ffmpeg.exe",
+        base_dir / "core" / "ffmpeg" / "ffmpeg.exe",
+        base_dir / "ffmpeg.exe",
+    ]
+
+    for candidate in candidates:
+        if candidate.exists():
+            return str(candidate)
+
+    system_ffmpeg = shutil.which("ffmpeg")
+    if system_ffmpeg:
+        return system_ffmpeg
+
+    return str(candidates[0])

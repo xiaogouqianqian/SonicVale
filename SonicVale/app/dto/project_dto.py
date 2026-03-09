@@ -35,3 +35,11 @@ class ProjectResponseDTO(BaseModel):
 class ProjectImportDTO(BaseModel):
     id : int
     content: str
+
+
+class ProjectAudiobookExportDTO(BaseModel):
+    export_path: str
+    chapter_ids: Optional[list[int]] = None
+    creator: Optional[str] = None
+    language: Optional[str] = "zh-CN"
+    identifier: Optional[str] = None

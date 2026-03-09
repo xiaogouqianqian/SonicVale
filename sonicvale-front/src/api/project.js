@@ -61,3 +61,7 @@ export function importEpub(projectId, formData) {
     headers: { 'Content-Type': 'multipart/form-data' }
   })
 }
+
+export function exportAudiobookEpub(projectId, data) {
+  return request.post(`/projects/${projectId}/export-epub-audiobook`, data)
+}

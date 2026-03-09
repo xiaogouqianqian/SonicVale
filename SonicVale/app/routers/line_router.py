@@ -52,6 +52,25 @@ def get_voice_service(db: Session = Depends(get_db)) -> VoiceService:
 def get_role_service(db: Session = Depends(get_db)) -> RoleService:
     repository = RoleRepository(db)
     return RoleService(repository)
+
+@router.post("/merge-audios", response_model=Res[dict])
+async def merge_audios(
+        payload: dict = Body(...),
+        line_service: LineService = Depends(get_line_service)):
+    source_paths = payload.get("source_paths") or []
+    source_items = payload.get("source_items") or []
+    output_path = payload.get("output_path")
+    output_format = payload.get("output_format") or "wav"
+    res = line_service.merge_audio_files(
+        source_paths=source_paths,
+        output_path=output_path,
+        output_format=output_format,
+        source_items=source_items
+    )
+    if res.get("success"):
+        return Res(data=res, code=200, message=res.get("message", "合并成功"))
+    return Res(data=res, code=400, message=res.get("message", "合并失败"))
+
 @router.post("/{project_id}", response_model=Res[LineResponseDTO],
              summary="创建台词",
              description="根据项目ID创建台词" )

@@ -42,6 +42,11 @@
                         <Setting />
                     </el-icon> 项目设置
                 </el-button>
+                <el-button type="success" @click="exportProjectAudiobookEpub" class="ml8">
+                    <el-icon>
+                        <Operation />
+                    </el-icon> 导出 EPUB3 有声书
+                </el-button>
                 <el-button type="primary" @click="openQueue = true" class="ml8">
                     <el-icon>
                         <Headset />
@@ -82,6 +87,20 @@
                                 <Upload />
                             </el-icon>
                             <span>导入 TXT/EPUB</span>
+
+                        </el-button>
+                                                <el-button type="warning" plain size="small" @click="batchSplitByLLM">
+                            <el-icon>
+                                <MagicStick />
+                            </el-icon>
+                            <span>批量生成台词</span>
+                        </el-button>
+
+                        <el-button type="primary" plain size="small" @click="batchExportCheckedChapters">
+                            <el-icon>
+                                <VideoPlay />
+                            </el-icon>
+                            <span>批量导出音频</span>
                         </el-button>
 
                         <el-button type="danger" plain size="small" @click="batchDeleteChapters">
@@ -89,13 +108,6 @@
                                 <Delete />
                             </el-icon>
                             <span>批量删除</span>
-                        </el-button>
-
-                        <el-button type="warning" plain size="small" @click="batchSplitByLLM">
-                            <el-icon>
-                                <MagicStick />
-                            </el-icon>
-                            <span>批量生成台词</span>
                         </el-button>
 
                         <el-button type="primary" plain size="small" @click="dialogNewChapter = true">
@@ -1130,7 +1142,6 @@ async function batchSplitByLLM() {
         const res = await chapterAPI.batchSplitByLLM(projectId, checkedChapterKeys.value)
         if (res?.code === 200) {
             ElMessage.success('批量生成完成')
-            // 如果当前章节在勾选之中，刷新它的台词
             if (checkedChapterKeys.value.includes(activeChapterId.value)) {
                 await loadLines()
                 await loadRoles()
@@ -1141,6 +1152,506 @@ async function batchSplitByLLM() {
     } catch (err) {
         ElMessage.error('批量LLM请求失败，请稍后再试')
         console.error('批量LLM失败:', err)
+    } finally {
+        loading.close()
+    }
+}
+
+
+function isRequestSuccess(res) {
+    return res?.code === 200 || res === true || res?.data === true || res?.data?.success === true
+}
+
+async function askAudioExportOptions() {
+    let exportSubtitle = true
+    try {
+        await ElMessageBox.confirm(
+            '是否生成字幕文件？<br><span style="color:#999;">（字幕生成需要语音识别，会增加导出时间）</span>',
+            '导出设置 - 字幕',
+            {
+                dangerouslyUseHTMLString: true,
+                confirmButtonText: '生成字幕',
+                cancelButtonText: '仅音频',
+                type: 'info'
+            }
+        )
+        exportSubtitle = true
+    } catch {
+        exportSubtitle = false
+    }
+
+    let isExportSingleSubtitle = false
+    if (exportSubtitle) {
+        try {
+            await ElMessageBox.confirm(
+                '是否额外导出所有的单条字幕？<br><span style="color:#999;">（额外导出会增加音频导出时间，推荐选择“否”）</span>',
+                '导出设置 - 单条字幕',
+                {
+                    dangerouslyUseHTMLString: true,
+                    confirmButtonText: '是',
+                    cancelButtonText: '否',
+                    type: 'info',
+                    cancelButtonClass: 'el-button--danger'
+                }
+            )
+            isExportSingleSubtitle = true
+        } catch {
+            isExportSingleSubtitle = false
+        }
+    }
+
+    return { exportSubtitle, isExportSingleSubtitle }
+}
+
+async function askBatchOutputFormat() {
+    try {
+        await ElMessageBox.confirm(
+            '请选择最终合并音频的输出格式。<br><span style="color:#999;">M4B 将写入章节信息，适合有声书场景。</span>',
+            '导出设置 - 输出格式',
+            {
+                dangerouslyUseHTMLString: true,
+                confirmButtonText: 'M4B（带章节）',
+                cancelButtonText: 'WAV',
+                distinguishCancelAndClose: true,
+                type: 'info'
+            }
+        )
+        return 'm4b'
+    } catch (action) {
+        if (action === 'cancel') {
+            return 'wav'
+        }
+        return null
+    }
+}
+
+function buildAudioExportErrorDetails(msg1, msg2, errors1, errors2, emptyOnly = false) {
+    let errorDetails = `${msg1}；${msg2}\n\n`
+    if (emptyOnly) {
+        errorDetails += '没有任何可导出的音频（所有台词都失败或跳过）\n\n'
+    }
+
+    if (errors1.length > 0) {
+        errorDetails += `阶段1失败详情：\n${errors1.slice(0, 5).join('\n')}`
+        if (errors1.length > 5) {
+            errorDetails += `\n... 还有 ${errors1.length - 5} 个错误`
+        }
+        errorDetails += '\n\n'
+    }
+
+    if (errors2.length > 0) {
+        errorDetails += `阶段2失败详情：\n${errors2.slice(0, 5).join('\n')}`
+        if (errors2.length > 5) {
+            errorDetails += `\n... 还有 ${errors2.length - 5} 个错误`
+        }
+    }
+
+    return errorDetails.trim()
+}
+
+async function exportChapterAudioFlow({ chapterId, chapterTitle, list, loading, exportSubtitle, isExportSingleSubtitle, progressPrefix = '' }) {
+    if (!Array.isArray(list) || list.length === 0) {
+        return {
+            success: false,
+            errorTitle: `无法导出：${chapterTitle}`,
+            errorDetails: '当前章节无台词，无法导出',
+            shortMessage: '无台词'
+        }
+    }
+
+    const prefix = progressPrefix ? `${progressPrefix} ` : ''
+    const titleText = `${prefix}${chapterTitle}`
+
+    loading?.setText(`${titleText}：正在批量修改 audio_path（阶段 1/3）...`)
+
+    let ok1 = 0, skip1 = 0, fail1 = 0
+    const errors1 = []
+
+    for (const line of list) {
+        if (!line.audio_path) { skip1++; continue }
+        const base = /[^/\\]+$/.exec(line.audio_path)?.[0] || ''
+        if (base.startsWith('temp_')) { skip1++; continue }
+
+        const tmpPath = addTempPrefix(line.audio_path)
+        if (!tmpPath) { skip1++; continue }
+
+        try {
+            const res = await lineAPI.updateLineAudioPath(line.id, {
+                chapter_id: line.chapter_id,
+                audio_path: tmpPath
+            })
+            if (isRequestSuccess(res)) {
+                line.audio_path = tmpPath
+                ok1++
+            } else {
+                fail1++
+                const errMsg = res?.message || res?.data?.message || '未知错误'
+                errors1.push(`台词#${line.id}(序号${line.line_order}): ${errMsg}`)
+                console.error(`阶段1失败 line#${line.id}:`, res)
+            }
+        } catch (e) {
+            fail1++
+            const errMsg = e?.response?.data?.message || e?.message || e.toString()
+            errors1.push(`台词#${line.id}(序号${line.line_order}): ${errMsg}`)
+            console.error(`阶段1异常 line#${line.id}:`, e?.response?.data || e)
+        }
+    }
+
+    loading?.setText(`${titleText}：正在批量修改 audio_path（阶段 2/3）...`)
+    let ok2 = 0, skip2 = 0, fail2 = 0
+    const errors2 = []
+
+    for (const line of list) {
+        if (!line.audio_path) { skip2++; continue }
+
+        const ord = Number.isInteger(line.line_order) ? line.line_order : null
+        if (ord == null) { skip2++; continue }
+
+        const text = (line.text_content || '').trim().slice(0, 10)
+        const cleanText = text.replace(/[\s\p{P}]/gu, '')
+        const safeText = cleanText.replace(/[\\/:*?"<>|]/g, '')
+        const newName = `${ord}_${safeText}.wav`
+        const currentName = /[^/\\]+$/.exec(line.audio_path)?.[0]
+        if (currentName === newName) { skip2++; continue }
+
+        const newPath = replaceFilename(line.audio_path, newName)
+        try {
+            const res = await lineAPI.updateLineAudioPath(line.id, {
+                chapter_id: line.chapter_id,
+                audio_path: newPath
+            })
+            if (isRequestSuccess(res)) {
+                line.audio_path = newPath
+                ok2++
+            } else {
+                fail2++
+                const errMsg = res?.message || res?.data?.message || '未知错误'
+                errors2.push(`台词#${line.id}(序号${line.line_order}): ${errMsg}`)
+                console.error(`阶段2失败 line#${line.id}:`, res)
+            }
+        } catch (e) {
+            fail2++
+            const errMsg = e?.response?.data?.message || e?.message || e.toString()
+            errors2.push(`台词#${line.id}(序号${line.line_order}): ${errMsg}`)
+            console.error(`阶段2异常 line#${line.id}:`, e?.response?.data || e)
+        }
+    }
+
+    const total = list.length
+    const msg1 = `阶段1：成功 ${ok1}，跳过 ${skip1}，失败 ${fail1}`
+    const msg2 = `阶段2：成功 ${ok2}，跳过 ${skip2}，失败 ${fail2}`
+    const hasValidAudio = (ok1 > 0 || ok2 > 0 || (skip1 > 0 && fail1 < total))
+
+    if (!hasValidAudio) {
+        const errorDetails = buildAudioExportErrorDetails(msg1, msg2, errors1, errors2, true) + '\n\n提示：请先为这些台词生成音频后再导出'
+        return {
+            success: false,
+            errorTitle: `无法导出：${chapterTitle}`,
+            errorDetails,
+            shortMessage: '无可导出音频'
+        }
+    }
+
+    const hasFailures = (fail1 > 0 || fail2 > 0)
+    if (hasFailures) {
+        loading?.setText(`${titleText}：正在导出音频与字幕（阶段 3/3）...\n注意：有 ${fail1 + fail2} 条台词失败将被跳过`)
+    } else {
+        loading?.setText(`${titleText}：正在导出音频与字幕（阶段 3/3）...`)
+    }
+
+    try {
+        const expRes = await lineAPI.exportLines(chapterId, isExportSingleSubtitle, exportSubtitle)
+        const data = expRes?.data || {}
+        const exportedCount = data.exported || 0
+        const skippedCount = data.skipped || 0
+        const totalCount = data.total || 0
+        const outputPath = data.output_path || ''
+        const subtitlePath = data.subtitle_path || ''
+        const hasRenameFailures = (fail1 > 0 || fail2 > 0)
+
+        let exportMsg = `导出完成：成功导出 ${exportedCount}/${totalCount} 条音频`
+        if (skippedCount > 0) {
+            exportMsg += `（跳过 ${skippedCount} 条未生成的台词）`
+        }
+        if (exportSubtitle && subtitlePath) {
+            exportMsg += ' + 字幕'
+        } else if (!exportSubtitle) {
+            exportMsg += '（未生成字幕）'
+        }
+
+        loading?.setText(
+            `${titleText}：导出完成（阶段 3/3）：\n` +
+            `- 音频：已导出 ${exportedCount} 条\n` +
+            (exportSubtitle ? `- 字幕：${subtitlePath ? '已生成' : '生成失败'}\n` : `- 字幕：未生成（用户跳过）\n`) +
+            (skippedCount > 0 ? `- 跳过：${skippedCount} 条未生成音频\n` : '') +
+            (hasRenameFailures ? `- 重命名失败：${fail1 + fail2} 条\n` : '') +
+            `${msg1}；${msg2}`
+        )
+
+        return {
+            success: true,
+            messageType: hasRenameFailures || skippedCount > 0 ? 'warning' : 'success',
+            summaryMessage: `${chapterTitle}：${exportMsg}`,
+            shortMessage: `导出 ${exportedCount}/${totalCount}`,
+            outputPath,
+            folderPath: outputPath ? getFolderFromPath(outputPath) : (list[0] ? getFolderFromPath(list[0].audio_path) : ''),
+            shouldRefreshActive: chapterId === activeChapterId.value
+        }
+    } catch (e) {
+        console.error('导出失败：', e)
+        const errorMsg = e?.response?.data?.message || e?.message || e.toString()
+        return {
+            success: false,
+            errorTitle: `导出失败：${chapterTitle}`,
+            errorDetails: `${errorMsg}\n\n${msg1}；${msg2}`,
+            shortMessage: errorMsg
+        }
+    }
+}
+
+async function batchExportCheckedChapters() {
+    if (checkedChapterKeys.value.length === 0) {
+        ElMessage.info('请先勾选要导出的章节')
+        return
+    }
+
+    try {
+        await ElMessageBox.confirm(
+            `将按当前单章导出逻辑批量导出所勾选的 ${checkedChapterKeys.value.length} 个章节，是否继续？`,
+            '批量导出章节音频',
+            {
+                confirmButtonText: '确认',
+                cancelButtonText: '取消',
+                type: 'warning'
+            }
+        )
+    } catch {
+        ElMessage.info('已取消操作')
+        return
+    }
+
+    const options = await askAudioExportOptions()
+    const outputFormat = await askBatchOutputFormat()
+    if (!outputFormat) {
+        ElMessage.info('已取消选择输出格式')
+        return
+    }
+    const safeProjectName = (project.value?.name || `project_${projectId}`).replace(/[\\/:*?"<>|]/g, '_')
+    const defaultDir = settingsForm.value?.project_root_path || (native?.getUserHome ? native.getUserHome() : '') || ''
+    const outputExt = outputFormat === 'm4b' ? 'm4b' : 'wav'
+    const savePath = native?.saveFile
+        ? await native.saveFile({
+            title: '选择最终合并音频输出位置',
+            defaultPath: `${defaultDir}${defaultDir ? '/' : ''}${safeProjectName}_selected_chapters.${outputExt}`,
+            filters: [{ name: outputFormat === 'm4b' ? 'M4B Audio' : 'WAV Audio', extensions: [outputExt] }]
+        })
+        : null
+
+    if (!savePath) {
+        ElMessage.info('已取消选择输出位置')
+        return
+    }
+
+    const loading = ElLoading.service({
+        lock: true,
+        text: '正在准备批量导出章节音频...',
+        background: 'rgba(0,0,0,0.3)'
+    })
+
+    const selectedIds = [...checkedChapterKeys.value]
+    const summaries = []
+    let successCount = 0
+    let failCount = 0
+    let firstFolderPath = ''
+    const mergedSourceItems = []
+    let shouldRefreshActive = false
+
+    try {
+        for (let index = 0; index < selectedIds.length; index++) {
+            const chapterId = selectedIds[index]
+            const chapter = chapters.value.find(item => item.id === chapterId)
+            const chapterTitle = chapter?.title || `章节${chapterId}`
+            const progressPrefix = `(${index + 1}/${selectedIds.length})`
+
+            loading.setText(`${progressPrefix} 正在读取 ${chapterTitle} 的台词...`)
+            const res = await lineAPI.getLinesByChapter(chapterId)
+            const chapterLines = res?.code === 200 ? (res.data || []) : []
+
+            const result = await exportChapterAudioFlow({
+                chapterId,
+                chapterTitle,
+                list: chapterLines,
+                loading,
+                exportSubtitle: options.exportSubtitle,
+                isExportSingleSubtitle: options.isExportSingleSubtitle,
+                progressPrefix
+            })
+
+            if (result.success) {
+                successCount++
+                summaries.push(`${chapterTitle}：${result.shortMessage}`)
+                if (result.outputPath) {
+                    mergedSourceItems.push({ path: result.outputPath, title: chapterTitle })
+                }
+                if (!firstFolderPath && result.folderPath) {
+                    firstFolderPath = result.folderPath
+                }
+                if (result.shouldRefreshActive) {
+                    shouldRefreshActive = true
+                }
+            } else {
+                failCount++
+                summaries.push(`${chapterTitle}：${result.shortMessage}`)
+                console.error(`${chapterTitle} 导出失败：`, result.errorDetails)
+            }
+        }
+    } finally {
+        loading.close()
+    }
+
+    if (shouldRefreshActive) {
+        await loadLines()
+        await loadChapterDetail(activeChapterId.value)
+    }
+
+    let mergeSuccess = false
+    let mergeMessage = ''
+    if (mergedSourceItems.length > 0) {
+        const mergeRes = await lineAPI.mergeAudios({
+            source_items: mergedSourceItems,
+            output_path: savePath,
+            output_format: outputFormat
+        })
+        if (mergeRes?.code === 200 && mergeRes?.data?.success) {
+            mergeSuccess = true
+            mergeMessage = outputFormat === 'm4b'
+                ? `最终 M4B 已输出到：${savePath}（包含章节信息）`
+                : `最终 WAV 已输出到：${savePath}`
+            firstFolderPath = getFolderFromPath(savePath)
+        } else {
+            mergeMessage = mergeRes?.message || mergeRes?.data?.message || '最终合并音频失败'
+        }
+    } else {
+        mergeMessage = '没有成功导出的章节，未生成最终合并音频'
+    }
+
+    const summaryText = [
+        `共处理 ${selectedIds.length} 个章节`,
+        `成功 ${successCount} 个`,
+        `失败 ${failCount} 个`,
+        '',
+        ...summaries.slice(0, 12),
+        '',
+        mergeMessage,
+        outputFormat === 'm4b' ? '已按所选章节写入章节信息。' : '最终文件为普通 WAV 合并音频。',
+        options.exportSubtitle ? '字幕仍按章节分别导出。' : '本次未生成字幕。'
+    ].join('\n')
+
+    if (failCount > 0 || !mergeSuccess) {
+        await ElMessageBox.alert(summaryText, '批量导出完成（部分失败）', {
+            confirmButtonText: '确定',
+            type: 'warning'
+        })
+    } else {
+        ElMessage.success(`批量导出完成，共 ${successCount} 个章节，已生成最终${outputFormat.toUpperCase()}文件`)
+    }
+
+    try {
+        if (native?.openFolder && firstFolderPath) {
+            native.openFolder(firstFolderPath)
+        }
+    } catch { }
+}
+
+async function exportProjectAudiobookEpub() {
+    const selectedChapterIds = checkedChapterKeys.value.length > 0
+        ? [...checkedChapterKeys.value]
+        : chapters.value.map(item => item.id)
+
+    if (selectedChapterIds.length === 0) {
+        ElMessage.info('当前没有可导出的章节')
+        return
+    }
+
+    const exportScopeText = checkedChapterKeys.value.length > 0
+        ? `当前勾选的 ${selectedChapterIds.length} 个章节`
+        : `当前项目全部 ${selectedChapterIds.length} 个章节`
+
+    try {
+        await ElMessageBox.confirm(
+            `将导出 ${exportScopeText} 为 EPUB 3 有声书。已配音章节会附带同步音频，未配音章节会保留为纯文本内容。是否继续？`,
+            '导出 EPUB3 有声书',
+            {
+                confirmButtonText: '确认',
+                cancelButtonText: '取消',
+                type: 'warning'
+            }
+        )
+    } catch {
+        ElMessage.info('已取消导出')
+        return
+    }
+
+    const safeProjectName = (project.value?.name || `project_${projectId}`).replace(/[\\/:*?"<>|]/g, '_')
+    const defaultDir = settingsForm.value?.project_root_path || (native?.getUserHome ? native.getUserHome() : '') || ''
+    const savePath = native?.saveFile
+        ? await native.saveFile({
+            title: '选择 EPUB 3 有声书输出位置',
+            defaultPath: `${defaultDir}${defaultDir ? '/' : ''}${safeProjectName}.epub`,
+            filters: [{ name: 'EPUB Ebook', extensions: ['epub'] }]
+        })
+        : null
+
+    if (!savePath) {
+        ElMessage.info('已取消选择输出位置')
+        return
+    }
+
+    const loading = ElLoading.service({
+        lock: true,
+        text: '正在生成 EPUB 3 有声书，请稍候...',
+        background: 'rgba(0,0,0,0.3)'
+    })
+
+    try {
+        const res = await projectAPI.exportAudiobookEpub(projectId, {
+            export_path: savePath,
+            chapter_ids: checkedChapterKeys.value.length > 0 ? selectedChapterIds : null,
+            language: 'zh-CN'
+        })
+
+        if (res?.code === 200) {
+            const data = res?.data || {}
+            const summaryText = [
+                `输出文件：${savePath}`,
+                `章节总数：${data.chapter_count || 0}`,
+                `带音频章节：${data.audio_chapter_count || 0}`,
+                `纯文本章节：${data.text_only_chapter_count || 0}`,
+                `跳过缺失音频台词：${data.skipped_audio_line_count || 0}`,
+                `总时长：${data.duration || '00:00:00.000'}`
+            ].join('\n')
+
+            if ((data.text_only_chapter_count || 0) > 0 || (data.skipped_audio_line_count || 0) > 0) {
+                await ElMessageBox.alert(summaryText, 'EPUB 3 有声书导出完成', {
+                    confirmButtonText: '确定',
+                    type: 'warning'
+                })
+            } else {
+                ElMessage.success('EPUB 3 有声书导出完成')
+            }
+
+            try {
+                const folderPath = getFolderFromPath(savePath)
+                if (native?.openFolder && folderPath) {
+                    native.openFolder(folderPath)
+                }
+            } catch { }
+        } else {
+            ElMessage.error(res?.message || 'EPUB 3 有声书导出失败')
+        }
+    } catch (error) {
+        console.error('导出 EPUB 3 有声书失败:', error)
+        ElMessage.error(error?.response?.data?.message || error?.message || 'EPUB 3 有声书导出失败')
     } finally {
         loading.close()
     }
@@ -2231,236 +2742,36 @@ async function markAllAsCompleted() {
         ElMessage.info('已取消操作')
         return
     }
+
+    const options = await askAudioExportOptions()
+
     const loading = ElLoading.service({
         lock: true,
-        text: '正在批量修改 audio_path（阶段 1/3）...',
+        text: '正在导出当前章节音频...',
         background: 'rgba(0,0,0,0.3)'
     })
 
-    // —— 阶段 1：全部先加 temp_ 前缀 —— //
-    let ok1 = 0, skip1 = 0, fail1 = 0
-    const errors1 = []  // 记录错误信息
-    
-    for (const line of list) {
-        if (!line.audio_path) { skip1++; continue }
-        const base = /[^/\\]+$/.exec(line.audio_path)?.[0] || ''
-        if (base.startsWith('temp_')) { skip1++; continue }
-
-        const tmpPath = addTempPrefix(line.audio_path)
-        if (!tmpPath) { skip1++; continue }
-
-        try {
-            const res = await lineAPI.updateLineAudioPath(line.id, {
-                chapter_id: line.chapter_id,
-                audio_path: tmpPath
-            })
-            const success = res?.code === 200 || res === true || res?.data === true
-            if (success) {
-                line.audio_path = tmpPath
-                ok1++
-            } else {
-                fail1++
-                const errMsg = res?.message || res?.data?.message || '未知错误'
-                errors1.push(`台词#${line.id}(序号${line.line_order}): ${errMsg}`)
-                console.error(`阶段1失败 line#${line.id}:`, res)
-            }
-        } catch (e) {
-            fail1++
-            const errMsg = e?.response?.data?.message || e?.message || e.toString()
-            errors1.push(`台词#${line.id}(序号${line.line_order}): ${errMsg}`)
-            console.error(`阶段1异常 line#${line.id}:`, e?.response?.data || e)
-        }
-    }
-
-    // —— 阶段 2：按 line_order 重命名为 index{line_order}.wav —— //
-    loading.setText('正在批量修改 audio_path（阶段 2/3）...')
-    let ok2 = 0, skip2 = 0, fail2 = 0
-    const errors2 = []  // 记录错误信息
-
-    for (const line of list) {
-        if (!line.audio_path) { skip2++; continue }
-
-        const ord = Number.isInteger(line.line_order) ? line.line_order : null
-        if (ord == null) { skip2++; continue }
-
-        // 取台词前10字作为文件名一部分
-        // 取台词前10字
-        const text = (line.text_content || '').trim().slice(0, 10)
-
-        // 去掉空格和中英文标点
-        const cleanText = text.replace(/[\s\p{P}]/gu, '')
-
-        // 再过滤掉文件名非法字符（Windows 不能包含 \/:*?"<>|）
-        const safeText = cleanText.replace(/[\\/:*?"<>|]/g, '')
-
-        const newName = `${ord}_${safeText}.wav`
-        // const newName = `index${ord}.wav`
-        const currentName = /[^/\\]+$/.exec(line.audio_path)?.[0]
-        console.log('currentName=', currentName)
-        if (currentName === newName) { skip2++; continue }
-
-        const newPath = replaceFilename(line.audio_path, newName)
-        try {
-            const res = await lineAPI.updateLineAudioPath(line.id, {
-                chapter_id: line.chapter_id,
-                audio_path: newPath
-            })
-            const success = res?.code === 200 || res === true || res?.data === true
-            if (success) {
-                line.audio_path = newPath
-                ok2++
-            } else {
-                fail2++
-                const errMsg = res?.message || res?.data?.message || '未知错误'
-                errors2.push(`台词#${line.id}(序号${line.line_order}): ${errMsg}`)
-                console.error(`阶段2失败 line#${line.id}:`, res)
-            }
-        } catch (e) {
-            fail2++
-            const errMsg = e?.response?.data?.message || e?.message || e.toString()
-            errors2.push(`台词#${line.id}(序号${line.line_order}): ${errMsg}`)
-            console.error(`阶段2异常 line#${line.id}:`, e?.response?.data || e)
-        }
-    }
-
-    // —— 阶段 3：导出音频与字幕（也显示在 Loading 里） —— //
-    const total = list.length
-    const msg1 = `阶段1：成功 ${ok1}，跳过 ${skip1}，失败 ${fail1}`
-    const msg2 = `阶段2：成功 ${ok2}，跳过 ${skip2}，失败 ${fail2}`
-
-    // 只要有成功重命名的台词，就继续导出（允许部分失败）
-    const hasValidAudio = (ok1 > 0 || ok2 > 0 || (skip1 > 0 && fail1 < total))
-    
-    if (hasValidAudio) {
-        // 有可导出的台词，进入导出阶段
-        const hasFailures = (fail1 > 0 || fail2 > 0)
-        if (hasFailures) {
-            loading.setText(`正在导出音频与字幕（阶段 3/3）...\n注意：有 ${fail1 + fail2} 条台词失败将被跳过`)
-        } else {
-            loading.setText('正在导出音频与字幕（阶段 3/3）...')
-        }
-
-        try {
-            // 先询问是否生成字幕
-            let exportSubtitle = true
-            try {
-                await ElMessageBox.confirm(
-                    '是否生成字幕文件？<br><span style="color:#999;">（字幕生成需要语音识别，会增加导出时间）</span>',
-                    '导出设置 - 字幕',
-                    {
-                        dangerouslyUseHTMLString: true,
-                        confirmButtonText: '生成字幕',
-                        cancelButtonText: '仅音频',
-                        type: 'info'
-                    }
-                )
-                exportSubtitle = true
-            } catch {
-                exportSubtitle = false
-            }
-
-            // 只有选择生成字幕时，才继续询问是否导出单条字幕
-            let isExportSingleSubtitle = false
-            if (exportSubtitle) {
-                try {
-                    await ElMessageBox.confirm(
-                        '是否额外导出所有的单条字幕？<br><span style="color:#999;">（额外导出会增加音频导出时间，推荐选择“否”）</span>',
-                        '导出设置 - 单条字幕',
-                        {
-                            dangerouslyUseHTMLString: true,
-                            confirmButtonText: '是',
-                            cancelButtonText: '否',
-                            type: 'info',
-                            cancelButtonClass: 'el-button--danger'
-                        }
-                    )
-                    isExportSingleSubtitle = true
-                } catch {
-                    isExportSingleSubtitle = false
-                }
-            }
-
-            const expRes = await lineAPI.exportLines(activeChapterId.value, isExportSingleSubtitle, exportSubtitle)
-
-            const data = expRes?.data || {}
-            
-            // 获取导出结果的详细信息
-            const exportedCount = data.exported || 0
-            const skippedCount = data.skipped || 0
-            const totalCount = data.total || 0
-            const outputPath = data.output_path || ''
-            const subtitlePath = data.subtitle_path || ''
-            
-            // 构建导出消息
-            let exportMsg = `导出完成：成功导出 ${exportedCount}/${totalCount} 条音频`
-            if (skippedCount > 0) {
-                exportMsg += `（跳过 ${skippedCount} 条未生成的台词）`
-            }
-            if (exportSubtitle && subtitlePath) {
-                exportMsg += ` + 字幕`
-            } else if (!exportSubtitle) {
-                exportMsg += `（未生成字幕）`
-            }
-
-            // 在 Loading 里展示导出结果摘要
-            const hasRenameFailures = (fail1 > 0 || fail2 > 0)
-            loading.setText(
-                `导出完成（阶段 3/3）：\n` +
-                `- 音频：已导出 ${exportedCount} 条\n` +
-                (exportSubtitle ? `- 字幕：${subtitlePath ? '已生成' : '生成失败'}\n` : `- 字幕：未生成（用户跳过）\n`) +
-                (skippedCount > 0 ? `- 跳过：${skippedCount} 条未生成音频\n` : '') +
-                (hasRenameFailures ? `- 重命名失败：${fail1 + fail2} 条\n` : '') +
-                `${msg1}；${msg2}`
-            )
-
-            // 友好提示 - 如果有重命名失败，显示 warning；否则根据跳过数量决定
-            const messageType = hasRenameFailures ? 'warning' : (skippedCount > 0 ? 'warning' : 'success')
-            const statusText = hasRenameFailures ? '部分完成' : '全部完成'
-            ElMessage[messageType](
-                `${statusText}（共 ${total} 条）。${msg1}；${msg2}；${exportMsg}`
-            )
-        } catch (e) {
-            console.error('导出失败：', e)
-            const errorMsg = e?.response?.data?.message || e?.message || e.toString()
-            loading.setText(`导出失败（阶段 3/3）：${errorMsg}\n${msg1}；${msg2}`)
-            ElMessage.error(`导出失败：${errorMsg}`)
-        } finally {
-            loading.close()
-        }
-    } else {
-        // 没有任何可导出的音频
-        loading.close()
-        
-        // 构建详细的错误信息
-        let errorDetails = `${msg1}；${msg2}\n\n没有任何可导出的音频（所有台词都失败或跳过）\n\n`
-        
-        if (errors1.length > 0) {
-            errorDetails += `阶段1失败详情：\n${errors1.slice(0, 5).join('\n')}`
-            if (errors1.length > 5) {
-                errorDetails += `\n... 还有 ${errors1.length - 5} 个错误`
-            }
-            errorDetails += '\n\n'
-        }
-        
-        if (errors2.length > 0) {
-            errorDetails += `阶段2失败详情：\n${errors2.slice(0, 5).join('\n')}`
-            if (errors2.length > 5) {
-                errorDetails += `\n... 还有 ${errors2.length - 5} 个错误`
-            }
-        }
-        
-        errorDetails += '\n\n提示：请先为这些台词生成音频后再导出'
-        
-        console.error('重命名失败详情：')
-        console.error('阶段1错误：', errors1)
-        console.error('阶段2错误：', errors2)
-        
-        // 使用 MessageBox 显示详细错误
-        ElMessageBox.alert(errorDetails, '无法导出：所有音频文件缺失', {
-            confirmButtonText: '确定',
-            type: 'warning',
-            customClass: 'error-detail-box'
+    try {
+        const result = await exportChapterAudioFlow({
+            chapterId: activeChapterId.value,
+            chapterTitle: currentChapter.value?.title || `章节${activeChapterId.value}`,
+            list,
+            loading,
+            exportSubtitle: options.exportSubtitle,
+            isExportSingleSubtitle: options.isExportSingleSubtitle
         })
+
+        if (result.success) {
+            ElMessage[result.messageType](result.summaryMessage)
+        } else {
+            await ElMessageBox.alert(result.errorDetails, result.errorTitle, {
+                confirmButtonText: '确定',
+                type: 'warning',
+                customClass: 'error-detail-box'
+            })
+        }
+    } finally {
+        loading.close()
     }
 
     // —— 自动打开输出文件夹 —— //

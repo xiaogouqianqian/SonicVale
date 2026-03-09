@@ -578,6 +578,104 @@ class LineService:
                         fout.write(block.astype(np.float32, copy=False))
         return out_path
 
+    def merge_audio_files(self, source_paths=None, output_path=None, output_format="wav", source_items=None):
+        if source_items:
+            valid_items = [item for item in source_items if item.get("path") and os.path.exists(item.get("path"))]
+        else:
+            valid_items = [{"path": p} for p in (source_paths or []) if p and os.path.exists(p)]
+
+        valid_paths = [item["path"] for item in valid_items]
+        if not valid_paths:
+            return {
+                "success": False,
+                "message": "没有可合并的音频文件"
+            }
+
+        if not output_path:
+            return {
+                "success": False,
+                "message": "输出路径不能为空"
+            }
+
+        output_format = (output_format or "wav").lower()
+        temp_wav_path = None
+        metadata_path = None
+
+        try:
+            os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
+
+            if output_format == "wav":
+                self.concat_wav_files(valid_paths, output_path)
+            elif output_format == "m4b":
+                ffmpeg_path = getFfmpegPath()
+                temp_wav = tempfile.NamedTemporaryFile(delete=False, suffix=".wav")
+                temp_wav.close()
+                temp_wav_path = temp_wav.name
+
+                self.concat_wav_files(valid_paths, temp_wav_path)
+
+                metadata_file = tempfile.NamedTemporaryFile(delete=False, suffix=".txt", mode="w", encoding="utf-8")
+                metadata_path = metadata_file.name
+                metadata_file.write(";FFMETADATA1\n")
+
+                start_ms = 0
+                for item in valid_items:
+                    chapter_path = item["path"]
+                    chapter_title = str(item.get("title") or os.path.splitext(os.path.basename(chapter_path))[0]).replace("\n", " ").replace("\r", " ")
+                    duration_ms = max(1, int(round(sf.info(chapter_path).duration * 1000)))
+                    end_ms = start_ms + duration_ms
+                    metadata_file.write("[CHAPTER]\n")
+                    metadata_file.write("TIMEBASE=1/1000\n")
+                    metadata_file.write(f"START={start_ms}\n")
+                    metadata_file.write(f"END={end_ms}\n")
+                    metadata_file.write(f"title={chapter_title}\n")
+                    start_ms = end_ms
+
+                metadata_file.close()
+
+                cmd = [
+                    ffmpeg_path,
+                    "-y",
+                    "-i", temp_wav_path,
+                    "-i", metadata_path,
+                    "-map_metadata", "1",
+                    "-vn",
+                    "-c:a", "aac",
+                    "-b:a", "128k",
+                    output_path
+                ]
+                subprocess.run(
+                    cmd,
+                    check=True,
+                    creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
+                )
+            else:
+                return {
+                    "success": False,
+                    "message": f"不支持的输出格式: {output_format}"
+                }
+
+            return {
+                "success": True,
+                "message": "合并成功",
+                "output_path": output_path,
+                "merged_count": len(valid_paths),
+                "output_format": output_format
+            }
+        except Exception as e:
+            print(f"[合并章节音频失败] {e}")
+            return {
+                "success": False,
+                "message": f"合并失败: {str(e)}"
+            }
+        finally:
+            for temp_path in [temp_wav_path, metadata_path]:
+                if temp_path and os.path.exists(temp_path):
+                    try:
+                        os.remove(temp_path)
+                    except OSError:
+                        pass
+
 
 
     def export_lines_to_excel(self,lines, file_path="all_lines.xlsx"):

@@ -1,5 +1,6 @@
 import os
 import shutil
+import tempfile
 
 from fastapi import APIRouter, Depends, HTTPException
 from typing import List
@@ -7,9 +8,10 @@ from typing import List
 from sqlalchemy.orm import Session
 
 from app.core.config import getConfigPath
+from app.core.epub_exporter import export_project_audiobook_epub
 from app.core.response import Res
 from app.db.database import get_db
-from app.dto.project_dto import ProjectCreateDTO, ProjectResponseDTO, ProjectImportDTO
+from app.dto.project_dto import ProjectCreateDTO, ProjectResponseDTO, ProjectImportDTO, ProjectAudiobookExportDTO
 from app.entity.chapter_entity import ChapterEntity
 from app.entity.project_entity import ProjectEntity
 from app.models.po import ChapterPO
@@ -19,6 +21,7 @@ from app.repositories.llm_provider_repository import LLMProviderRepository
 from app.repositories.role_repository import RoleRepository
 from app.repositories.tts_provider_repository import TTSProviderRepository
 from app.services.chapter_service import ChapterService
+from app.services.line_service import LineService
 from app.services.project_service import ProjectService
 from app.repositories.project_repository import ProjectRepository
 from app.services.role_service import RoleService
@@ -39,6 +42,13 @@ def get_chapter_service(db: Session = Depends(get_db)) -> ChapterService:
 def get_role_service(db: Session = Depends(get_db)) -> RoleService:
     repository = RoleRepository(db)  # ✅ 传入 db
     return RoleService(repository)
+
+
+def get_line_service(db: Session = Depends(get_db)) -> LineService:
+    repository = LineRepository(db)
+    role_repository = RoleRepository(db)
+    tts_repository = TTSProviderRepository(db)
+    return LineService(repository, role_repository, tts_repository)
 
 
 @router.post("/", response_model=Res[ProjectResponseDTO],
@@ -163,7 +173,6 @@ def import_project(project_id: int, dto: ProjectImportDTO,service: ProjectServic
 
 # 新增：EPUB 文件导入
 from fastapi import File, UploadFile
-import tempfile
 
 @router.post("/{project_id}/import-epub")
 async def import_epub(project_id: int,
@@ -204,3 +213,46 @@ async def import_epub(project_id: int,
         chapter_service.create_chapter(ChapterEntity(project_id=project_id, title=ch.get("chapter_name"), text_content=ch.get("content")))
 
     return Res(code=200, message="EPUB 导入成功", data=chapter_list)
+
+
+@router.post("/{project_id}/export-epub-audiobook")
+def export_epub_audiobook(
+    project_id: int,
+    dto: ProjectAudiobookExportDTO,
+    service: ProjectService = Depends(get_service),
+    chapter_service: ChapterService = Depends(get_chapter_service),
+    line_service: LineService = Depends(get_line_service),
+):
+    project = service.get_project(project_id)
+    if project is None:
+        return Res(code=400, message="项目不存在")
+
+    chapters = list(chapter_service.get_all_chapters(project_id) or [])
+    if dto.chapter_ids:
+        selected_ids = set(dto.chapter_ids)
+        chapters = [chapter for chapter in chapters if chapter.id in selected_ids]
+
+    if not chapters:
+        return Res(code=400, message="没有可导出的章节")
+
+    chapter_lines_map = {
+        chapter.id: list(line_service.get_all_lines(chapter.id) or [])
+        for chapter in chapters
+    }
+
+    try:
+        result = export_project_audiobook_epub(
+            project=project,
+            chapters=chapters,
+            chapter_lines_map=chapter_lines_map,
+            output_path=dto.export_path,
+            line_service=line_service,
+            creator=dto.creator,
+            language=dto.language or "zh-CN",
+            identifier=dto.identifier,
+        )
+        return Res(code=200, message="EPUB 3 有声书导出成功", data=result)
+    except ValueError as exc:
+        return Res(code=400, message=str(exc), data=None)
+    except Exception as exc:
+        return Res(code=500, message=f"EPUB 3 有声书导出失败: {exc}", data=None)
