@@ -42,10 +42,15 @@
                         <Setting />
                     </el-icon> 项目设置
                 </el-button>
-                <el-button type="success" @click="exportProjectAudiobookEpub" class="ml8">
+                <el-button type="success" @click="exportProjectAudiobookEpub()" class="ml8">
                     <el-icon>
                         <Operation />
                     </el-icon> 导出 EPUB3 有声书
+                </el-button>
+                <el-button type="warning" @click="exportProjectAudiobookEpub('apple_books_read_aloud')" class="ml8">
+                    <el-icon>
+                        <Operation />
+                    </el-icon> 导出 Apple 图书朗读版
                 </el-button>
                 <el-button type="primary" @click="openQueue = true" class="ml8">
                     <el-icon>
@@ -1563,7 +1568,7 @@ async function batchExportCheckedChapters() {
     } catch { }
 }
 
-async function exportProjectAudiobookEpub() {
+async function exportProjectAudiobookEpub(exportMode = 'standard') {
     const selectedChapterIds = checkedChapterKeys.value.length > 0
         ? [...checkedChapterKeys.value]
         : chapters.value.map(item => item.id)
@@ -1577,10 +1582,33 @@ async function exportProjectAudiobookEpub() {
         ? `当前勾选的 ${selectedChapterIds.length} 个章节`
         : `当前项目全部 ${selectedChapterIds.length} 个章节`
 
+    const isAppleReadAloud = exportMode === 'apple_books_read_aloud'
+    const exportMeta = isAppleReadAloud
+        ? {
+            dialogTitle: '导出 Apple 图书朗读版',
+            confirmText: `将导出 ${exportScopeText} 为 Apple 图书固定版式朗读 EPUB。该模式会按固定页面组织内容，并为每条已配音台词生成独立 M4A 音频。是否继续？`,
+            pickerTitle: '选择 Apple 图书朗读版输出位置',
+            loadingText: '正在生成 Apple 图书固定版式朗读 EPUB，请稍候...',
+            successTitle: 'Apple 图书朗读版导出完成',
+            successText: 'Apple 图书朗读版导出完成',
+            defaultLanguage: 'zh-Hans',
+            fileSuffix: '-apple-readaloud'
+        }
+        : {
+            dialogTitle: '导出 EPUB3 有声书',
+            confirmText: `将导出 ${exportScopeText} 为 EPUB 3 有声书。已配音章节会附带同步音频，未配音章节会保留为纯文本内容。是否继续？`,
+            pickerTitle: '选择 EPUB 3 有声书输出位置',
+            loadingText: '正在生成 EPUB 3 有声书，请稍候...',
+            successTitle: 'EPUB 3 有声书导出完成',
+            successText: 'EPUB 3 有声书导出完成',
+            defaultLanguage: 'zh-CN',
+            fileSuffix: ''
+        }
+
     try {
         await ElMessageBox.confirm(
-            `将导出 ${exportScopeText} 为 EPUB 3 有声书。已配音章节会附带同步音频，未配音章节会保留为纯文本内容。是否继续？`,
-            '导出 EPUB3 有声书',
+            exportMeta.confirmText,
+            exportMeta.dialogTitle,
             {
                 confirmButtonText: '确认',
                 cancelButtonText: '取消',
@@ -1596,8 +1624,8 @@ async function exportProjectAudiobookEpub() {
     const defaultDir = settingsForm.value?.project_root_path || (native?.getUserHome ? native.getUserHome() : '') || ''
     const savePath = native?.saveFile
         ? await native.saveFile({
-            title: '选择 EPUB 3 有声书输出位置',
-            defaultPath: `${defaultDir}${defaultDir ? '/' : ''}${safeProjectName}.epub`,
+            title: exportMeta.pickerTitle,
+            defaultPath: `${defaultDir}${defaultDir ? '/' : ''}${safeProjectName}${exportMeta.fileSuffix}.epub`,
             filters: [{ name: 'EPUB Ebook', extensions: ['epub'] }]
         })
         : null
@@ -1609,7 +1637,7 @@ async function exportProjectAudiobookEpub() {
 
     const loading = ElLoading.service({
         lock: true,
-        text: '正在生成 EPUB 3 有声书，请稍候...',
+        text: exportMeta.loadingText,
         background: 'rgba(0,0,0,0.3)'
     })
 
@@ -1617,27 +1645,35 @@ async function exportProjectAudiobookEpub() {
         const res = await projectAPI.exportAudiobookEpub(projectId, {
             export_path: savePath,
             chapter_ids: checkedChapterKeys.value.length > 0 ? selectedChapterIds : null,
-            language: 'zh-CN'
+            language: exportMeta.defaultLanguage,
+            export_mode: exportMode
         })
 
         if (res?.code === 200) {
             const data = res?.data || {}
-            const summaryText = [
+            const summaryLines = [
+                `导出模式：${data.export_mode_label || exportMeta.dialogTitle}`,
                 `输出文件：${savePath}`,
                 `章节总数：${data.chapter_count || 0}`,
                 `带音频章节：${data.audio_chapter_count || 0}`,
                 `纯文本章节：${data.text_only_chapter_count || 0}`,
                 `跳过缺失音频台词：${data.skipped_audio_line_count || 0}`,
                 `总时长：${data.duration || '00:00:00.000'}`
-            ].join('\n')
+            ]
+
+            if (data.page_count) {
+                summaryLines.splice(3, 0, `页面总数：${data.page_count}`)
+            }
+
+            const summaryText = summaryLines.join('\n')
 
             if ((data.text_only_chapter_count || 0) > 0 || (data.skipped_audio_line_count || 0) > 0) {
-                await ElMessageBox.alert(summaryText, 'EPUB 3 有声书导出完成', {
+                await ElMessageBox.alert(summaryText, data.export_mode_label || exportMeta.successTitle, {
                     confirmButtonText: '确定',
                     type: 'warning'
                 })
             } else {
-                ElMessage.success('EPUB 3 有声书导出完成')
+                ElMessage.success(data.export_mode_label || exportMeta.successText)
             }
 
             try {
@@ -1647,11 +1683,11 @@ async function exportProjectAudiobookEpub() {
                 }
             } catch { }
         } else {
-            ElMessage.error(res?.message || 'EPUB 3 有声书导出失败')
+            ElMessage.error(res?.message || `${exportMeta.dialogTitle}导出失败`)
         }
     } catch (error) {
-        console.error('导出 EPUB 3 有声书失败:', error)
-        ElMessage.error(error?.response?.data?.message || error?.message || 'EPUB 3 有声书导出失败')
+        console.error(`${exportMeta.dialogTitle}失败:`, error)
+        ElMessage.error(error?.response?.data?.message || error?.message || `${exportMeta.dialogTitle}失败`)
     } finally {
         loading.close()
     }
@@ -4614,6 +4650,7 @@ function restoreLastChapter() {
     overflow: hidden;
     text-overflow: ellipsis;
     display: -webkit-box;
+    line-clamp: 2;
     -webkit-line-clamp: 2;
     -webkit-box-orient: vertical;
 }

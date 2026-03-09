@@ -13,7 +13,7 @@ import soundfile as sf
 from app.core.config import getFfmpegPath
 
 
-CSS_CONTENT = """body {
+FLOWING_CSS_CONTENT = """body {
   font-family: serif;
   line-height: 1.7;
   margin: 5%%;
@@ -21,6 +21,15 @@ CSS_CONTENT = """body {
 
 h1 {
   margin-bottom: 1.2em;
+}
+
+.chapter-audio {
+    margin: 0 0 1.4em;
+    text-indent: 0;
+}
+
+.chapter-audio audio {
+    width: 100%%;
 }
 
 p {
@@ -31,6 +40,69 @@ p {
 .line {
   text-indent: 0;
 }
+"""
+
+APPLE_PAGE_WIDTH = 1200
+APPLE_PAGE_HEIGHT = 1600
+
+APPLE_FIXED_LAYOUT_CSS = f"""html, body {{
+  margin: 0;
+  padding: 0;
+  width: 100%%;
+  height: 100%%;
+}}
+
+body {{
+  font-family: "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+  background: #efe5d4;
+  color: #2a211b;
+}}
+
+.page {{
+  box-sizing: border-box;
+  position: relative;
+  width: {APPLE_PAGE_WIDTH}px;
+  height: {APPLE_PAGE_HEIGHT}px;
+  padding: 118px 108px 126px;
+  overflow: hidden;
+  background:
+    radial-gradient(circle at top right, rgba(255, 255, 255, 0.55), transparent 32%%),
+    linear-gradient(180deg, #f7efdf 0%%, #efe3cf 100%%);
+}}
+
+.chapter-title {{
+  margin: 0 0 52px;
+  font-size: 52px;
+  line-height: 1.2;
+  letter-spacing: 1px;
+}}
+
+.line,
+.paragraph {{
+  margin: 0 0 24px;
+  font-size: 37px;
+  line-height: 1.62;
+  word-break: break-word;
+}}
+
+.paragraph {{
+  text-indent: 2em;
+}}
+
+.page-footer {{
+  position: absolute;
+  right: 96px;
+  bottom: 64px;
+  font-size: 24px;
+  color: rgba(42, 33, 27, 0.56);
+}}
+
+.-epub-media-overlay-active {{
+  color: #7a1f16;
+  background: rgba(255, 214, 153, 0.55);
+  border-radius: 10px;
+  box-shadow: 0 0 0 4px rgba(255, 214, 153, 0.28);
+}}
 """
 
 
@@ -45,12 +117,36 @@ def _safe_file_stem(prefix: str, index: int) -> str:
     return f"{prefix}_{index:03d}"
 
 
+def _normalize_language(language: str | None, export_mode: str) -> str:
+    value = _safe_text(language, "zh-CN")
+    if export_mode == "apple_books_read_aloud":
+        normalized = value.lower()
+        if normalized in {"zh", "zh-cn", "zh-hans-cn", "zh-chs"}:
+            return "zh-Hans"
+        if normalized in {"zh-tw", "zh-hk", "zh-hant", "zh-hant-tw", "zh-cht"}:
+            return "zh-Hant"
+    return value
+
+
 def _format_clock(seconds: float) -> str:
     total_millis = max(0, int(round(seconds * 1000)))
     hours, remainder = divmod(total_millis, 3600 * 1000)
     minutes, remainder = divmod(remainder, 60 * 1000)
     secs, millis = divmod(remainder, 1000)
     return f"{hours:02d}:{minutes:02d}:{secs:02d}.{millis:03d}"
+
+
+def _split_text_parts(chapter_text: str | None) -> list[str]:
+    content = _safe_text(chapter_text)
+    if not content:
+        return ["本章暂无可导出的正文。"]
+
+    parts = [part.strip() for part in re.split(r"\n\s*\n", content) if part.strip()]
+    if not parts:
+        parts = [line.strip() for line in content.splitlines() if line.strip()]
+    if not parts:
+        parts = [content]
+    return parts
 
 
 def _build_text_blocks(lines, chapter_text: str | None, chapter_token: str):
@@ -69,49 +165,67 @@ def _build_text_blocks(lines, chapter_text: str | None, chapter_token: str):
             })
         return "\n".join(blocks), entries
 
-    content = _safe_text(chapter_text)
-    if not content:
-        content = "本章暂无可导出的正文。"
-
-    parts = [part.strip() for part in re.split(r"\n\s*\n", content) if part.strip()]
-    if not parts:
-        parts = [line.strip() for line in content.splitlines() if line.strip()]
-    if not parts:
-        parts = [content]
-
     blocks = []
-    for index, part in enumerate(parts, start=1):
+    for index, part in enumerate(_split_text_parts(chapter_text), start=1):
         anchor = f"{chapter_token}-para-{index:04d}"
         escaped_text = html.escape(part)
         blocks.append(f'<p><span id="{anchor}">{escaped_text}</span></p>')
     return "\n".join(blocks), []
 
 
-def _build_chapter_xhtml(title: str, body_html: str) -> str:
-    escaped_title = html.escape(title)
-    return f"""<?xml version=\"1.0\" encoding=\"utf-8\"?>
-<html xmlns=\"http://www.w3.org/1999/xhtml\" xmlns:epub=\"http://www.idpf.org/2007/ops\" lang=\"zh-CN\" xml:lang=\"zh-CN\">
-  <head>
-    <title>{escaped_title}</title>
-    <link rel=\"stylesheet\" type=\"text/css\" href=\"../styles/book.css\" />
-  </head>
-  <body epub:type=\"bodymatter chapter\">
-    <section>
-      <h1>{escaped_title}</h1>
-      {body_html}
-    </section>
-  </body>
+def _build_chapter_xhtml(title: str, body_html: str, language: str, audio_href: str | None = None) -> str:
+        escaped_title = html.escape(title)
+        escaped_language = html.escape(language)
+        audio_block = ""
+        if audio_href:
+                escaped_audio_href = html.escape(audio_href)
+                audio_block = f"""
+            <div class=\"chapter-audio\">
+                <audio controls=\"controls\" preload=\"none\">
+                    <source src=\"{escaped_audio_href}\" type=\"audio/mpeg\" />
+                </audio>
+            </div>"""
+
+        return f"""<?xml version=\"1.0\" encoding=\"utf-8\"?>
+<html xmlns=\"http://www.w3.org/1999/xhtml\" xmlns:epub=\"http://www.idpf.org/2007/ops\" lang=\"{escaped_language}\" xml:lang=\"{escaped_language}\">
+    <head>
+        <title>{escaped_title}</title>
+        <link rel=\"stylesheet\" type=\"text/css\" href=\"../styles/book.css\" />
+    </head>
+    <body epub:type=\"bodymatter chapter\">
+        <section>
+            <h1>{escaped_title}</h1>
+{audio_block}
+            {body_html}
+        </section>
+    </body>
 </html>
 """
 
 
-def _build_nav_xhtml(book_title: str, nav_items: list[dict]) -> str:
+def _build_nav_xhtml(book_title: str, nav_items: list[dict], language: str, landmark_items: list[dict] | None = None) -> str:
     nav_links = "\n".join(
-        f'        <li><a href="{html.escape(item["href"])}">{html.escape(item["title"])}</a></li>'
+        f'        <li><a href="{html.escape(item["href"])}">{html.escape(item["title"])} </a></li>'
         for item in nav_items
     )
+    landmarks_block = ""
+    if landmark_items:
+        landmark_links = "\n".join(
+            f'        <li><a href="{html.escape(item["href"])}" epub:type="{html.escape(item["epub_type"])}">{html.escape(item["title"])} </a></li>'
+            for item in landmark_items
+        )
+        landmarks_block = (
+            "\n    <nav epub:type=\"landmarks\" id=\"landmarks\">\n"
+            "      <h2>Landmarks</h2>\n"
+            "      <ol>\n"
+            f"{landmark_links}\n"
+            "      </ol>\n"
+            "    </nav>"
+        )
+
+    escaped_language = html.escape(language)
     return f"""<?xml version=\"1.0\" encoding=\"utf-8\"?>
-<html xmlns=\"http://www.w3.org/1999/xhtml\" xmlns:epub=\"http://www.idpf.org/2007/ops\" lang=\"zh-CN\" xml:lang=\"zh-CN\">
+<html xmlns=\"http://www.w3.org/1999/xhtml\" xmlns:epub=\"http://www.idpf.org/2007/ops\" lang=\"{escaped_language}\" xml:lang=\"{escaped_language}\">
   <head>
     <title>{html.escape(book_title)}</title>
   </head>
@@ -121,37 +235,149 @@ def _build_nav_xhtml(book_title: str, nav_items: list[dict]) -> str:
       <ol>
 {nav_links}
       </ol>
-    </nav>
+    </nav>{landmarks_block}
   </body>
 </html>
 """
 
 
-def _build_smil(chapter_name: str, chapter_token: str, anchors: list[str], segments: list[dict]) -> str:
-        items = []
-        current_offset = 0.0
-        for anchor, segment in zip(anchors, segments):
-                duration = max(0.0, float(segment["duration"]))
-                begin = _format_clock(current_offset)
-                current_offset += duration
-                end = _format_clock(current_offset)
-                items.append(
-                        "      <par>\n"
-                        f"        <text src=\"../text/{chapter_token}.xhtml#{anchor}\" />\n"
-                        f"        <audio src=\"../audio/{chapter_token}.mp3\" clipBegin=\"{begin}\" clipEnd=\"{end}\" />\n"
-                        "      </par>"
-                )
+def _build_smil(chapter_token: str, anchors: list[str], segments: list[dict]) -> str:
+    items = []
+    current_offset = 0.0
+    for anchor, segment in zip(anchors, segments):
+        duration = max(0.0, float(segment["duration"]))
+        begin = _format_clock(current_offset)
+        current_offset += duration
+        end = _format_clock(current_offset)
+        items.append(
+            "      <par>\n"
+            f"        <text src=\"../text/{chapter_token}.xhtml#{anchor}\" />\n"
+            f"        <audio src=\"../audio/{chapter_token}.mp3\" clipBegin=\"{begin}\" clipEnd=\"{end}\" />\n"
+            "      </par>"
+        )
 
-        return f"""<?xml version=\"1.0\" encoding=\"utf-8\"?>
+    return f"""<?xml version=\"1.0\" encoding=\"utf-8\"?>
 <smil xmlns=\"http://www.w3.org/ns/SMIL\" xmlns:epub=\"http://www.idpf.org/2007/ops\" version=\"3.0\">
-    <head>
-        <meta name=\"dc:title\" content=\"{html.escape(chapter_name)}\" />
-    </head>
-    <body>
-        <seq id=\"{chapter_token}-seq\" epub:textref=\"../text/{chapter_token}.xhtml\">
+  <body>
+    <seq id=\"{chapter_token}-seq\" epub:textref=\"../text/{chapter_token}.xhtml\">
 {os.linesep.join(items)}
-        </seq>
-    </body>
+    </seq>
+  </body>
+</smil>
+"""
+
+
+def _estimate_page_entry_weight(text: str, kind: str) -> int:
+    base = max(1, len(text))
+    if kind == "paragraph":
+        return base + 32
+    return base + 18
+
+
+def _paginate_entries(entries: list[dict], first_page_budget: int, page_budget: int, max_items: int) -> list[list[dict]]:
+    pages: list[list[dict]] = []
+    current: list[dict] = []
+    current_budget = first_page_budget
+    current_weight = 0
+
+    for entry in entries:
+        entry_weight = _estimate_page_entry_weight(entry["text"], entry["kind"])
+        if current and (current_weight + entry_weight > current_budget or len(current) >= max_items):
+            pages.append(current)
+            current = []
+            current_budget = page_budget
+            current_weight = 0
+
+        current.append(entry)
+        current_weight += entry_weight
+
+    if current or not pages:
+        pages.append(current)
+
+    return pages
+
+
+def _build_fixed_layout_entries(lines, chapter_text: str | None, chapter_token: str) -> list[dict]:
+    if lines:
+        entries = []
+        for index, line in enumerate(lines, start=1):
+            anchor = f"{chapter_token}-line-{index:04d}"
+            raw_text = _safe_text(getattr(line, "text_content", None), "……")
+            entry = {
+                "anchor": anchor,
+                "text": raw_text,
+                "kind": "line",
+            }
+            audio_path = getattr(line, "audio_path", None)
+            if audio_path and os.path.exists(audio_path):
+                entry["audio_path"] = audio_path
+                entry["duration"] = float(sf.info(audio_path).duration)
+            entries.append(entry)
+        return entries
+
+    entries = []
+    for index, part in enumerate(_split_text_parts(chapter_text), start=1):
+        entries.append({
+            "anchor": f"{chapter_token}-para-{index:04d}",
+            "text": part,
+            "kind": "paragraph",
+        })
+    return entries
+
+
+def _build_fixed_page_xhtml(
+    title: str,
+    entries: list[dict],
+    page_number: int,
+    total_pages: int,
+    language: str,
+    include_title: bool,
+) -> str:
+    content_blocks = []
+    if include_title:
+        content_blocks.append(f'<h1 class="chapter-title">{html.escape(title)}</h1>')
+    for entry in entries:
+        text = html.escape(entry["text"]) if entry["text"] else "&#160;"
+        css_class = "line" if entry["kind"] == "line" else "paragraph"
+        content_blocks.append(f'<p class="{css_class}"><span id="{entry["anchor"]}">{text}</span></p>')
+
+    if not content_blocks:
+        content_blocks.append('<p class="paragraph">本页暂无内容。</p>')
+
+    escaped_language = html.escape(language)
+    return f"""<?xml version=\"1.0\" encoding=\"utf-8\"?>
+<html xmlns=\"http://www.w3.org/1999/xhtml\" xmlns:epub=\"http://www.idpf.org/2007/ops\" lang=\"{escaped_language}\" xml:lang=\"{escaped_language}\">
+  <head>
+    <title>{html.escape(title)}</title>
+    <meta name=\"viewport\" content=\"width={APPLE_PAGE_WIDTH}, height={APPLE_PAGE_HEIGHT}\" />
+    <link rel=\"stylesheet\" type=\"text/css\" href=\"../styles/book.css\" />
+  </head>
+  <body>
+    <section class=\"page\" epub:type=\"bodymatter chapter\">
+      {' '.join(content_blocks)}
+      <div class=\"page-footer\">{page_number} / {total_pages}</div>
+    </section>
+  </body>
+</html>
+"""
+
+
+def _build_fixed_layout_smil(page_token: str, xhtml_href: str, segments: list[dict]) -> str:
+    items = []
+    for index, segment in enumerate(segments, start=1):
+        clip_end = _format_clock(max(0.0, float(segment["duration"])))
+        items.append(
+            f'    <par id="{page_token}-par-{index:03d}">\n'
+            f'      <text src="../{xhtml_href}#{segment["anchor"]}" />\n'
+            f'      <audio src="../audio/{segment["audio_file"]}" clipBegin="00:00:00.000" clipEnd="{clip_end}" />\n'
+            '    </par>'
+        )
+
+    return f"""<?xml version=\"1.0\" encoding=\"utf-8\"?>
+<smil xmlns=\"http://www.w3.org/ns/SMIL\" version=\"3.0\" profile=\"http://www.idpf.org/epub/30/profile/content/\">
+  <body>
+{os.linesep.join(items)}
+  </body>
 </smil>
 """
 
@@ -175,6 +401,9 @@ def _build_package_opf(
     manifest_items: list[str],
     spine_items: list[str],
     total_duration: float,
+    extra_metadata: list[str] | None = None,
+    package_prefix: str | None = None,
+    spine_attributes: str = "",
 ) -> str:
     modified = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     duration_meta = ""
@@ -183,21 +412,24 @@ def _build_package_opf(
 
     creator_meta = f"    <dc:creator>{html.escape(creator)}</dc:creator>\n" if creator else ""
     overlays = "".join(f"    {item}\n" for item in overlay_metadata)
+    extras = "".join(f"    {item}\n" for item in (extra_metadata or []))
     manifest = "\n".join(f"    {item}" for item in manifest_items)
     spine = "\n".join(f"    {item}" for item in spine_items)
+    package_prefix_attr = f' prefix="{html.escape(package_prefix)}"' if package_prefix else ""
+    spine_attr = f" {spine_attributes.strip()}" if spine_attributes.strip() else ""
 
     return f"""<?xml version=\"1.0\" encoding=\"utf-8\"?>
-<package xmlns=\"http://www.idpf.org/2007/opf\" xmlns:dc=\"http://purl.org/dc/elements/1.1/\" version=\"3.0\" unique-identifier=\"book-id\">
+<package xmlns=\"http://www.idpf.org/2007/opf\" xmlns:dc=\"http://purl.org/dc/elements/1.1/\" version=\"3.0\" unique-identifier=\"book-id\"{package_prefix_attr}>
   <metadata>
     <dc:identifier id=\"book-id\">{html.escape(identifier)}</dc:identifier>
     <dc:title>{html.escape(title)}</dc:title>
     <dc:language>{html.escape(language)}</dc:language>
 {creator_meta}    <meta property=\"dcterms:modified\">{modified}</meta>
-{overlays}{duration_meta}  </metadata>
+{extras}{overlays}{duration_meta}  </metadata>
   <manifest>
 {manifest}
   </manifest>
-  <spine>
+  <spine{spine_attr}>
 {spine}
   </spine>
 </package>
@@ -225,7 +457,24 @@ def _export_chapter_audio(line_service, source_paths: list[str], output_mp3_path
             os.remove(temp_wav_path)
 
 
-def export_project_audiobook_epub(
+def _convert_audio_to_m4a(source_path: str, output_path: str):
+    ffmpeg_path = getFfmpegPath()
+    cmd = [
+        ffmpeg_path,
+        "-y",
+        "-i", source_path,
+        "-vn",
+        "-c:a", "aac",
+        "-b:a", "256k",
+        "-ac", "2",
+        "-ar", "44100",
+        output_path,
+    ]
+    creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    subprocess.run(cmd, check=True, creationflags=creationflags)
+
+
+def _export_flowing_audiobook_epub(
     project,
     chapters,
     chapter_lines_map: dict[int, list],
@@ -235,9 +484,6 @@ def export_project_audiobook_epub(
     language: str = "zh-CN",
     identifier: str | None = None,
 ):
-    if not chapters:
-        raise ValueError("没有可导出的章节")
-
     os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
     temp_dir = tempfile.mkdtemp(prefix="sonicvale_epub_")
     book_title = _safe_text(getattr(project, "name", None), "SonicVale Audiobook")
@@ -258,13 +504,9 @@ def export_project_audiobook_epub(
 
     try:
         with zipfile.ZipFile(output_path, "w") as archive:
-            archive.writestr(
-                "mimetype",
-                "application/epub+zip",
-                compress_type=zipfile.ZIP_STORED,
-            )
+            archive.writestr("mimetype", "application/epub+zip", compress_type=zipfile.ZIP_STORED)
             archive.writestr("META-INF/container.xml", _build_container_xml())
-            archive.writestr("OEBPS/styles/book.css", CSS_CONTENT)
+            archive.writestr("OEBPS/styles/book.css", FLOWING_CSS_CONTENT)
 
             for index, chapter in enumerate(chapters, start=1):
                 chapter_token = _safe_file_stem("chapter", index)
@@ -295,6 +537,7 @@ def export_project_audiobook_epub(
                     smil_id = f"{chapter_token}-smil"
                     audio_id = f"{chapter_token}-audio"
                     chapter_duration = sum(item["duration"] for item in valid_segments)
+                    chapter_audio_href = f"../audio/{chapter_token}.mp3"
                     manifest_items.append(
                         f'<item id="{xhtml_id}" href="{xhtml_href}" media-type="application/xhtml+xml" media-overlay="{smil_id}" />'
                     )
@@ -309,24 +552,15 @@ def export_project_audiobook_epub(
                     )
 
                     output_mp3_path = os.path.join(temp_dir, f"{chapter_token}.mp3")
-                    _export_chapter_audio(
-                        line_service,
-                        [item["audio_path"] for item in valid_segments],
-                        output_mp3_path,
-                    )
+                    _export_chapter_audio(line_service, [item["audio_path"] for item in valid_segments], output_mp3_path)
                     archive.write(output_mp3_path, f"OEBPS/audio/{chapter_token}.mp3")
                     archive.writestr(
                         f"OEBPS/{xhtml_href}",
-                        _build_chapter_xhtml(chapter_title, body_html),
+                        _build_chapter_xhtml(chapter_title, body_html, language, audio_href=chapter_audio_href),
                     )
                     archive.writestr(
                         f"OEBPS/smil/{chapter_token}.smil",
-                        _build_smil(
-                            chapter_title,
-                            chapter_token,
-                            [item["anchor"] for item in valid_segments],
-                            valid_segments,
-                        ),
+                        _build_smil(chapter_token, [item["anchor"] for item in valid_segments], valid_segments),
                     )
                     total_duration += chapter_duration
                 else:
@@ -334,21 +568,18 @@ def export_project_audiobook_epub(
                     manifest_items.append(
                         f'<item id="{xhtml_id}" href="{xhtml_href}" media-type="application/xhtml+xml" />'
                     )
-                    archive.writestr(
-                        f"OEBPS/{xhtml_href}",
-                        _build_chapter_xhtml(chapter_title, body_html),
-                    )
+                    archive.writestr(f"OEBPS/{xhtml_href}", _build_chapter_xhtml(chapter_title, body_html, language))
 
             if audio_chapter_count == 0:
                 raise ValueError("没有任何可导出的章节音频，请先生成章节台词音频")
 
-            archive.writestr("OEBPS/nav.xhtml", _build_nav_xhtml(book_title, nav_items))
+            archive.writestr("OEBPS/nav.xhtml", _build_nav_xhtml(book_title, nav_items, language))
             archive.writestr(
                 "OEBPS/package.opf",
                 _build_package_opf(
                     title=book_title,
                     creator=book_creator,
-                    language=_safe_text(language, "zh-CN"),
+                    language=language,
                     identifier=book_identifier,
                     overlay_metadata=overlay_metadata,
                     manifest_items=manifest_items,
@@ -371,4 +602,226 @@ def export_project_audiobook_epub(
         "text_only_chapter_count": text_only_chapter_count,
         "skipped_audio_line_count": skipped_audio_line_count,
         "duration": _format_clock(total_duration),
+        "export_mode": "standard",
+        "export_mode_label": "标准 EPUB 3 有声书",
     }
+
+
+def _export_apple_read_aloud_epub(
+    project,
+    chapters,
+    chapter_lines_map: dict[int, list],
+    output_path: str,
+    creator: str | None = None,
+    language: str = "zh-Hans",
+    identifier: str | None = None,
+):
+    os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
+    temp_dir = tempfile.mkdtemp(prefix="sonicvale_apple_epub_")
+    book_title = _safe_text(getattr(project, "name", None), "SonicVale Read Aloud")
+    book_creator = _safe_text(creator)
+    book_identifier = _safe_text(identifier, f"urn:uuid:{uuid.uuid4()}")
+
+    manifest_items = [
+        '<item id="nav" href="nav.xhtml" media-type="application/xhtml+xml" properties="nav" />',
+        '<item id="book-css" href="styles/book.css" media-type="text/css" />',
+    ]
+    overlay_metadata = []
+    spine_items = []
+    nav_items = []
+    landmark_items = []
+    total_duration = 0.0
+    audio_chapter_count = 0
+    text_only_chapter_count = 0
+    skipped_audio_line_count = 0
+    page_count = 0
+
+    try:
+        with zipfile.ZipFile(output_path, "w") as archive:
+            archive.writestr("mimetype", "application/epub+zip", compress_type=zipfile.ZIP_STORED)
+            archive.writestr("META-INF/container.xml", _build_container_xml())
+            archive.writestr("OEBPS/styles/book.css", APPLE_FIXED_LAYOUT_CSS)
+
+            chapter_page_sets = []
+            total_pages = 0
+            for chapter_index, chapter in enumerate(chapters, start=1):
+                chapter_token = _safe_file_stem("chapter", chapter_index)
+                chapter_title = _safe_text(getattr(chapter, "title", None), f"第{chapter_index}章")
+                entries = _build_fixed_layout_entries(
+                    chapter_lines_map.get(chapter.id) or [],
+                    getattr(chapter, "text_content", None),
+                    chapter_token,
+                )
+                page_groups = _paginate_entries(entries, first_page_budget=380, page_budget=470, max_items=12)
+                chapter_page_sets.append((chapter_token, chapter_title, page_groups))
+                total_pages += len(page_groups)
+
+            if total_pages == 0:
+                raise ValueError("没有可导出的章节内容")
+
+            current_page_number = 0
+            for chapter_token, chapter_title, page_groups in chapter_page_sets:
+                chapter_has_audio = False
+
+                for page_index, page_entries in enumerate(page_groups, start=1):
+                    current_page_number += 1
+                    page_count += 1
+                    page_token = f"{chapter_token}_page_{page_index:03d}"
+                    xhtml_id = f"{page_token}-xhtml"
+                    xhtml_href = f"text/{page_token}.xhtml"
+
+                    if page_index == 1:
+                        nav_items.append({"href": xhtml_href, "title": chapter_title})
+                        if not landmark_items:
+                            landmark_items.append({
+                                "href": xhtml_href,
+                                "title": "开始阅读",
+                                "epub_type": "bodymatter",
+                            })
+
+                    page_audio_segments = []
+                    for audio_index, entry in enumerate(page_entries, start=1):
+                        audio_path = entry.get("audio_path")
+                        if audio_path and os.path.exists(audio_path):
+                            audio_file = f"{page_token}_audio_{audio_index:03d}.m4a"
+                            audio_output_path = os.path.join(temp_dir, audio_file)
+                            _convert_audio_to_m4a(audio_path, audio_output_path)
+                            archive.write(audio_output_path, f"OEBPS/audio/{audio_file}")
+                            manifest_items.append(
+                                f'<item id="{page_token}-audio-{audio_index:03d}" href="audio/{audio_file}" media-type="audio/m4a" />'
+                            )
+                            page_audio_segments.append({
+                                "anchor": entry["anchor"],
+                                "audio_file": audio_file,
+                                "duration": float(entry["duration"]),
+                            })
+                        elif entry.get("text"):
+                            skipped_audio_line_count += 1
+
+                    archive.writestr(
+                        f"OEBPS/{xhtml_href}",
+                        _build_fixed_page_xhtml(
+                            title=chapter_title,
+                            entries=page_entries,
+                            page_number=current_page_number,
+                            total_pages=total_pages,
+                            language=language,
+                            include_title=page_index == 1,
+                        ),
+                    )
+
+                    if page_audio_segments:
+                        chapter_has_audio = True
+                        smil_id = f"{page_token}-smil"
+                        page_duration = sum(item["duration"] for item in page_audio_segments)
+                        manifest_items.append(
+                            f'<item id="{xhtml_id}" href="{xhtml_href}" media-type="application/xhtml+xml" media-overlay="{smil_id}" />'
+                        )
+                        manifest_items.append(
+                            f'<item id="{smil_id}" href="smil/{page_token}.smil" media-type="application/smil+xml" />'
+                        )
+                        overlay_metadata.append(
+                            f'<meta property="media:duration" refines="#{smil_id}">{_format_clock(page_duration)}</meta>'
+                        )
+                        archive.writestr(
+                            f"OEBPS/smil/{page_token}.smil",
+                            _build_fixed_layout_smil(page_token, xhtml_href, page_audio_segments),
+                        )
+                        total_duration += page_duration
+                    else:
+                        manifest_items.append(
+                            f'<item id="{xhtml_id}" href="{xhtml_href}" media-type="application/xhtml+xml" />'
+                        )
+
+                    spine_items.append(f'<itemref idref="{xhtml_id}" />')
+
+                if chapter_has_audio:
+                    audio_chapter_count += 1
+                else:
+                    text_only_chapter_count += 1
+
+            if audio_chapter_count == 0:
+                raise ValueError("没有任何可导出的章节音频，请先生成章节台词音频")
+
+            archive.writestr(
+                "OEBPS/nav.xhtml",
+                _build_nav_xhtml(book_title, nav_items, language, landmark_items=landmark_items),
+            )
+            archive.writestr(
+                "OEBPS/package.opf",
+                _build_package_opf(
+                    title=book_title,
+                    creator=book_creator,
+                    language=language,
+                    identifier=book_identifier,
+                    overlay_metadata=overlay_metadata,
+                    manifest_items=manifest_items,
+                    spine_items=spine_items,
+                    total_duration=total_duration,
+                    extra_metadata=[
+                        '<meta property="rendition:layout">pre-paginated</meta>',
+                        '<meta property="rendition:spread">none</meta>',
+                        '<meta property="media:active-class">-epub-media-overlay-active</meta>',
+                    ],
+                    package_prefix='rendition: http://www.idpf.org/vocab/rendition/#',
+                ),
+            )
+    except Exception:
+        if os.path.exists(output_path):
+            os.remove(output_path)
+        raise
+    finally:
+        shutil.rmtree(temp_dir, ignore_errors=True)
+
+    return {
+        "success": True,
+        "output_path": output_path,
+        "chapter_count": len(chapters),
+        "audio_chapter_count": audio_chapter_count,
+        "text_only_chapter_count": text_only_chapter_count,
+        "skipped_audio_line_count": skipped_audio_line_count,
+        "duration": _format_clock(total_duration),
+        "page_count": page_count,
+        "export_mode": "apple_books_read_aloud",
+        "export_mode_label": "Apple 图书固定版式朗读 EPUB",
+    }
+
+
+def export_project_audiobook_epub(
+    project,
+    chapters,
+    chapter_lines_map: dict[int, list],
+    output_path: str,
+    line_service,
+    creator: str | None = None,
+    language: str = "zh-CN",
+    identifier: str | None = None,
+    export_mode: str = "standard",
+):
+    if not chapters:
+        raise ValueError("没有可导出的章节")
+
+    normalized_mode = _safe_text(export_mode, "standard")
+    normalized_language = _normalize_language(language, normalized_mode)
+
+    if normalized_mode == "apple_books_read_aloud":
+        return _export_apple_read_aloud_epub(
+            project=project,
+            chapters=chapters,
+            chapter_lines_map=chapter_lines_map,
+            output_path=output_path,
+            creator=creator,
+            language=normalized_language,
+            identifier=identifier,
+        )
+
+    return _export_flowing_audiobook_epub(
+        project=project,
+        chapters=chapters,
+        chapter_lines_map=chapter_lines_map,
+        output_path=output_path,
+        line_service=line_service,
+        creator=creator,
+        language=normalized_language,
+        identifier=identifier,
+    )

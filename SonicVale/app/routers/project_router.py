@@ -250,8 +250,9 @@ def export_epub_audiobook(
             creator=dto.creator,
             language=dto.language or "zh-CN",
             identifier=dto.identifier,
+            export_mode=dto.export_mode or "standard",
         )
-        return Res(code=200, message="EPUB 3 有声书导出成功", data=result)
+        return Res(code=200, message=f"{result.get('export_mode_label') or 'EPUB 3 有声书'}导出成功", data=result)
     except ValueError as exc:
         return Res(code=400, message=str(exc), data=None)
     except Exception as exc:

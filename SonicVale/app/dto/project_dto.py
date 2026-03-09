@@ -43,3 +43,4 @@ class ProjectAudiobookExportDTO(BaseModel):
     creator: Optional[str] = None
     language: Optional[str] = "zh-CN"
     identifier: Optional[str] = None
+    export_mode: Optional[str] = "standard"
