@@ -2,15 +2,14 @@ import json
 import logging
 import os
 import zlib
-import tempfile
 import threading
 
 from .ASRData import ASRDataSeg, ASRData
+from app.core.config import getConfigPath
 
 
 class BaseASR:
     SUPPORTED_SOUND_FORMAT = ["flac", "m4a", "mp3", "wav"]
-    CACHE_FILE = os.path.join(tempfile.gettempdir(), "bk_asr", "asr_cache.json")
     _lock = threading.Lock()
 
     def __init__(self, audio_path: [str, bytes], use_cache: bool = False):
@@ -19,6 +18,7 @@ class BaseASR:
 
         self.crc32_hex = None
         self.use_cache = use_cache
+        self.cache_file = os.path.join(getConfigPath(), "cache", "bk_asr", "asr_cache.json")
 
         self._set_data()
 
@@ -27,11 +27,11 @@ class BaseASR:
     def _load_cache(self):
         if not self.use_cache:
             return {}
-        os.makedirs(os.path.dirname(self.CACHE_FILE), exist_ok=True)
+        os.makedirs(os.path.dirname(self.cache_file), exist_ok=True)
         with self._lock:
-            if os.path.exists(self.CACHE_FILE):
+            if os.path.exists(self.cache_file):
                 try:
-                    with open(self.CACHE_FILE, 'r', encoding='utf-8') as f:
+                    with open(self.cache_file, 'r', encoding='utf-8') as f:
                         cache = json.load(f)
                         if isinstance(cache, dict):
                             return cache
@@ -44,10 +44,10 @@ class BaseASR:
             return
         with self._lock:
             try:
-                with open(self.CACHE_FILE, 'w', encoding='utf-8') as f:
+                with open(self.cache_file, 'w', encoding='utf-8') as f:
                     json.dump(self.cache, f, ensure_ascii=False, indent=2)
-                if os.path.exists(self.CACHE_FILE) and os.path.getsize(self.CACHE_FILE) > 10 * 1024 * 1024:
-                    os.remove(self.CACHE_FILE)
+                if os.path.exists(self.cache_file) and os.path.getsize(self.cache_file) > 10 * 1024 * 1024:
+                    os.remove(self.cache_file)
             except IOError as e:
                 logging.error(f"Failed to save cache: {e}")
 

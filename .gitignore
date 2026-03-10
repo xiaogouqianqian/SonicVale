@@ -1,0 +1,11 @@
+userdata/
+*.db
+*.sqlite
+*.sqlite3
+
+# build outputs
+SonicVale/build/
+SonicVale/dist/
+sonicvale-front/electron/backend/
+sonicvale-front/release/
+sonicvale-front/dist/

@@ -1,7 +1,6 @@
 # app/tts_worker.py
 import asyncio
 from fastapi import FastAPI
-from markdown_it.rules_block import reference
 
 from app.core.ws_manager import manager
 from app.db.database import SessionLocal

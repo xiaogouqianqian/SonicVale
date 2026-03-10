@@ -99,6 +99,60 @@
 
 ---
 
+## 开发环境
+
+### 1. 环境要求
+
+- Windows
+- Python 3.12
+- Node.js 20 LTS
+- npm
+
+### 2. 克隆后初始化
+
+在仓库根目录创建项目专用虚拟环境：
+
+```powershell
+python -m venv .venv
+```
+
+安装后端依赖：
+
+```powershell
+cd SonicVale
+..\.venv\Scripts\python.exe -m pip install --upgrade pip
+..\.venv\Scripts\python.exe -m pip install -r requirements-build.txt
+```
+
+安装前端依赖：
+
+```powershell
+cd ..\sonicvale-front
+npm install
+```
+
+回到仓库根目录后，使用下面的脚本启动开发环境：
+
+```powershell
+cd ..
+.\start-dev.bat
+```
+
+说明：
+
+- `start-dev.bat` 已配置为强制使用仓库根目录下的 `.venv`，不会依赖系统全局 Python。
+- 开发时产生的用户数据默认写入仓库根目录下的 `userdata`，该目录已被 Git 忽略，不会自动上传。
+
+### 3. FFmpeg 要求
+
+本项目依赖 FFmpeg 进行音频处理。克隆仓库后，需要满足以下两种方式之一：
+
+1. 在系统中安装 FFmpeg，并确保终端执行 `ffmpeg -version` 能成功。
+2. 将 `ffmpeg.exe` 放到 `SonicVale/app/core/ffmpeg/ffmpeg.exe`。
+
+后端启动时会优先查找项目内的 FFmpeg，找不到时再回退到系统环境变量中的 `ffmpeg`。
+
+
 ## 📜 开源协议与二次开发约束
 
 ### 1. 上游仓库链接

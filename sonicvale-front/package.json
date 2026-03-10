@@ -10,7 +10,7 @@
     "preview": "vite preview",
     "electron": "electron .",
     "start": "concurrently \"npm run dev\" \"npm run electron\"",
-    "electron-build": "vite build && electron-builder"
+    "electron-build": "vite build && electron-builder --win portable"
   },
   "build": {
     "appId": "com.example.yingu",
@@ -28,9 +28,12 @@
     ],
     "win": {
       "icon": "resource/icon/yingu.ico",
-      "target": "nsis",
+      "target": "portable",
       "signAndEditExecutable": false,
       "verifyUpdateCodeSignature": false
+    },
+    "portable": {
+      "artifactName": "音谷-${version}-portable.${ext}"
     },
     "nsis": {
       "oneClick": false,

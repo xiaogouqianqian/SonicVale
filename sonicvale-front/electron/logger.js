@@ -1,6 +1,10 @@
 // logger.js
 const log = require('electron-log');
 const iconv = require('iconv-lite');
+const path = require('path');
+const { app } = require('electron');
+
+log.transports.file.resolvePathFn = () => path.join(app.getPath('userData'), 'logs', 'main.log');
 
 // 保存原始 console（避免丢失）
 const raw = { ...console };

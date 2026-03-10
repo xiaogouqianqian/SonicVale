@@ -1,12 +1,39 @@
-
-const logger = require('./logger');
-const { decodeText } = require('./logger');
 const { app, BrowserWindow, ipcMain, dialog, shell } = require('electron')
 const path = require('path')
 const fs = require('fs')
 const { spawn, exec } = require('child_process')
 const os = require('os')
 const http = require('http')
+
+
+function ensureDir(dirPath) {
+  fs.mkdirSync(dirPath, { recursive: true })
+  return dirPath
+}
+
+function resolveDataRoot() {
+  if (process.env.SONICVALE_DATA_DIR) {
+    return process.env.SONICVALE_DATA_DIR
+  }
+
+  if (process.env.PORTABLE_EXECUTABLE_DIR) {
+    return path.join(process.env.PORTABLE_EXECUTABLE_DIR, 'userdata')
+  }
+
+  if (app.isPackaged) {
+    return path.join(path.dirname(process.execPath), 'userdata')
+  }
+
+  return path.join(__dirname, '..', '..', 'userdata')
+}
+
+
+const dataRoot = ensureDir(resolveDataRoot())
+app.setPath('userData', dataRoot)
+app.setPath('sessionData', path.join(dataRoot, 'session'))
+
+const logger = require('./logger');
+const { decodeText } = require('./logger');
 
 
 let backendProcess = null
@@ -18,11 +45,16 @@ function startBackend() {
     : path.join(process.resourcesPath, 'app.asar.unpacked', 'electron', 'main.exe') // prod 路径
 
   console.log('启动后端：', exePath)
+  console.log('用户数据目录：', dataRoot)
 
   backendProcess = spawn(exePath, [], {
     cwd: path.dirname(exePath),
     detached: true,  // ❗关闭主进程时能跟着退出
     stdio: ['ignore', 'pipe', 'pipe'], // 输出日志供调试
+    env: {
+      ...process.env,
+      SONICVALE_DATA_DIR: dataRoot,
+    },
   })
 
   // 日志输出（可选）
