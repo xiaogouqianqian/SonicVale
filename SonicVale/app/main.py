@@ -408,4 +408,4 @@ if __name__ == "__main__":
     # uvicorn.run(app, host="127.0.0.1", port=8200)
     # 使用自定义 logger，避免 uvicorn 自动配置失败
     # logging.basicConfig(level=logging.INFO)
-    uvicorn.run("app.main:app", host="127.0.0.1", port=8200, log_config=None)
+    uvicorn.run(app, host="127.0.0.1", port=8200, log_config=None)
