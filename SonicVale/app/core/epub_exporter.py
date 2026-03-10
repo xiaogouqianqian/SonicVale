@@ -122,6 +122,11 @@ SOURCE_EPUB_OVERLAY_STYLE = """.sonicvale-audio {
     width: 100%;
 }
 
+.sonicvale-sentence-segment,
+.sonicvale-sentence-group {
+    display: inline;
+}
+
 .-epub-media-overlay-active {
     color: #7a1f16;
     background: rgba(255, 214, 153, 0.55);
@@ -214,6 +219,64 @@ def _format_clock(seconds: float) -> str:
     minutes, remainder = divmod(remainder, 60 * 1000)
     secs, millis = divmod(remainder, 1000)
     return f"{hours:02d}:{minutes:02d}:{secs:02d}.{millis:03d}"
+
+
+def _sentence_duration_weight(text: str) -> float:
+    normalized = _safe_text(text)
+    if not normalized:
+        return 1.0
+
+    punctuation_bonus = 0.0
+    punctuation_bonus += normalized.count("，") * 0.6
+    punctuation_bonus += normalized.count(",") * 0.4
+    punctuation_bonus += normalized.count("、") * 0.35
+    punctuation_bonus += normalized.count("；") * 0.7
+    punctuation_bonus += normalized.count("：") * 0.5
+    punctuation_bonus += normalized.count("。") * 1.0
+    punctuation_bonus += normalized.count("！") * 1.0
+    punctuation_bonus += normalized.count("？") * 1.0
+    punctuation_bonus += normalized.count("…") * 0.8
+    return max(1.0, len(normalized) + punctuation_bonus)
+
+
+def _split_line_into_overlay_segments(text: str | None, duration: float, anchor_prefix: str) -> list[dict]:
+    raw_text = _safe_text(text)
+    if not raw_text:
+        return []
+
+    sentences = [sentence for sentence in TEXT_CORRECTOR.split_sentences(raw_text) if _safe_text(sentence)]
+    if not sentences:
+        sentences = [raw_text]
+
+    if len(sentences) == 1:
+        return [{
+            "anchor": anchor_prefix,
+            "text": sentences[0],
+            "duration": max(0.0, float(duration)),
+        }]
+
+    weights = [_sentence_duration_weight(sentence) for sentence in sentences]
+    total_weight = sum(weights) or float(len(sentences))
+    remaining_duration = max(0.0, float(duration))
+    segments = []
+
+    for sentence_index, sentence in enumerate(sentences, start=1):
+        if sentence_index == len(sentences):
+            segment_duration = remaining_duration
+        else:
+            segment_duration = max(0.0, float(duration) * (weights[sentence_index - 1] / total_weight))
+            remaining_slots = len(sentences) - sentence_index
+            min_reserved = max(0.0, remaining_slots * 0.001)
+            segment_duration = min(segment_duration, max(0.0, remaining_duration - min_reserved))
+
+        remaining_duration = max(0.0, remaining_duration - segment_duration)
+        segments.append({
+            "anchor": f"{anchor_prefix}-sent-{sentence_index:02d}",
+            "text": sentence,
+            "duration": segment_duration,
+        })
+
+    return segments
 
 
 def _split_text_parts(chapter_text: str | None) -> list[str]:
@@ -337,6 +400,50 @@ def _iter_overlay_block_candidates(body_tag):
             yield element
 
 
+def _ensure_sentence_spans(soup: BeautifulSoup, block):
+    existing = block.find_all("span", class_="sonicvale-sentence-segment", recursive=False)
+    if existing:
+        return existing
+
+    block_text = block.get_text("", strip=False)
+    sentences = TEXT_CORRECTOR.split_sentences(block_text)
+    sentences = [sentence for sentence in sentences if _safe_text(sentence)]
+    if not sentences:
+        sentences = [_safe_text(block_text)] if _safe_text(block_text) else []
+
+    if not sentences:
+        return []
+
+    block.clear()
+    spans = []
+    for sentence in sentences:
+        span = soup.new_tag("span")
+        span["class"] = ["sonicvale-sentence-segment"]
+        span.string = sentence
+        block.append(span)
+        spans.append(span)
+    return spans
+
+
+def _iter_sentence_candidates(soup: BeautifulSoup, body_tag):
+    for block_index, block in enumerate(_iter_overlay_block_candidates(body_tag)):
+        sentence_spans = _ensure_sentence_spans(soup, block)
+        for sentence_index, span in enumerate(sentence_spans):
+            span_classes = span.attrs.get("class", []) if hasattr(span, "attrs") else []
+            if "sonicvale-sentence-used" in span_classes:
+                continue
+            sentence_text = _safe_text(span.get_text("", strip=False))
+            if not sentence_text:
+                continue
+            yield {
+                "block": block,
+                "block_index": block_index,
+                "sentence_index": sentence_index,
+                "span": span,
+                "text": sentence_text,
+            }
+
+
 def _blocks_are_consecutive(left_block, right_block) -> bool:
     sibling = left_block.next_sibling
     while sibling is not None:
@@ -347,74 +454,133 @@ def _blocks_are_consecutive(left_block, right_block) -> bool:
     return False
 
 
-def _iter_block_windows(blocks: list, start_index: int, end_index: int, max_window_size: int = 4):
+def _iter_sentence_windows(candidates: list[dict], start_index: int, end_index: int, max_window_size: int = 3):
     for index in range(start_index, end_index):
-        yield index, [blocks[index]]
-        parent = getattr(blocks[index], "parent", None)
-        window = [blocks[index]]
+        yield index, [candidates[index]]
+        window = [candidates[index]]
         for next_index in range(index + 1, min(end_index, index + max_window_size)):
-            candidate = blocks[next_index]
-            if getattr(candidate, "parent", None) is not parent:
+            previous = window[-1]
+            current = candidates[next_index]
+            same_block_next_sentence = (
+                previous["block"] is current["block"]
+                and current["sentence_index"] == previous["sentence_index"] + 1
+            )
+            next_block_first_sentence = (
+                previous["block_index"] + 1 == current["block_index"]
+                and current["sentence_index"] == 0
+                and _blocks_are_consecutive(previous["block"], current["block"])
+            )
+            if not (same_block_next_sentence or next_block_first_sentence):
                 break
-            if not _blocks_are_consecutive(window[-1], candidate):
-                break
-            window = window + [candidate]
+            window = window + [current]
             yield index, window
 
 
-def _anchor_block_window(soup: BeautifulSoup, blocks: list, preferred_anchor: str) -> tuple[str, int]:
-    if len(blocks) == 1:
-        existing_id = _safe_text(blocks[0].attrs.get("id"))
+def _window_advancement_cost(window: list[dict], start_index: int) -> int:
+    if not window:
+        return 999999
+    return max(0, window[0].get("doc_index", 0) - start_index)
+
+
+def _anchor_sentence_window(soup: BeautifulSoup, window: list[dict], preferred_anchor: str) -> tuple[str, int]:
+    if len(window) == 1:
+        span = window[0]["span"]
+        existing_id = _safe_text(span.attrs.get("id"))
         anchor = existing_id or preferred_anchor
-        blocks[0]["id"] = anchor
+        span["id"] = anchor
+        span_classes = list(span.attrs.get("class", []))
+        if "sonicvale-sentence-used" not in span_classes:
+            span_classes.append("sonicvale-sentence-used")
+            span["class"] = span_classes
         return anchor, 1
 
-    first_block = blocks[0]
-    parent = first_block.parent
+    unique_blocks = []
+    for item in window:
+        if not unique_blocks or unique_blocks[-1] is not item["block"]:
+            unique_blocks.append(item["block"])
+
+    if len(unique_blocks) == 1:
+        first_span = window[0]["span"]
+        wrapper = soup.new_tag("span")
+        wrapper["id"] = preferred_anchor
+        wrapper["class"] = ["sonicvale-sentence-group"]
+        first_span.insert_before(wrapper)
+        for item in window:
+            span_classes = list(item["span"].attrs.get("class", []))
+            if "sonicvale-sentence-used" not in span_classes:
+                span_classes.append("sonicvale-sentence-used")
+                item["span"]["class"] = span_classes
+            wrapper.append(item["span"].extract())
+        return preferred_anchor, len(window)
+
+    first_block = unique_blocks[0]
     wrapper = soup.new_tag("div")
     wrapper["id"] = preferred_anchor
     wrapper["class"] = ["sonicvale-overlay-group"]
     first_block.insert_before(wrapper)
-
-    for block in blocks:
+    for block in unique_blocks:
         wrapper.append(block.extract())
+    return preferred_anchor, len(window)
 
-    return preferred_anchor, len(blocks)
 
-
-def _attach_block_anchor(soup: BeautifulSoup, body_tag, target_text: str, preferred_anchor: str, start_index: int):
+def _attach_sentence_anchor(soup: BeautifulSoup, body_tag, target_text: str, preferred_anchor: str, start_index: int):
     normalized_target = _normalize_match_text(target_text)
     if not normalized_target:
         return False, preferred_anchor, start_index
 
-    blocks = list(_iter_overlay_block_candidates(body_tag))
+    candidates = list(_iter_sentence_candidates(soup, body_tag))
+    for doc_index, candidate in enumerate(candidates):
+        candidate["doc_index"] = doc_index
+
     best_index = None
     best_anchor = preferred_anchor
     best_score = 0.0
-    search_end = min(len(blocks), max(0, start_index) + 24)
     best_window = None
 
-    for index, window in _iter_block_windows(blocks, max(0, start_index), search_end):
-        block_text = "".join(block.get_text("", strip=True) for block in window)
-        score = _best_sentence_alignment_score(target_text, block_text)
-        score += min(0.03, max(0, len(window) - 1) * 0.01)
-        if score > best_score:
+    def consider_window(index: int, window: list[dict]):
+        nonlocal best_index, best_anchor, best_score, best_window
+        window_text = "".join(item["text"] for item in window)
+        base_score = _best_sentence_alignment_score(target_text, window_text)
+        advancement_cost = _window_advancement_cost(window, max(0, start_index))
+        distance_penalty = advancement_cost * 0.035
+        score = base_score - max(0, len(window) - 1) * 0.05 - distance_penalty
+        if (
+            score > best_score
+            or (
+                best_window
+                and abs(score - best_score) <= 0.015
+                and (
+                    advancement_cost < _window_advancement_cost(best_window, max(0, start_index))
+                    or len(window) < len(best_window)
+                )
+            )
+        ):
             best_index = index
             best_window = window
             if len(window) == 1:
-                existing_id = _safe_text(window[0].attrs.get("id"))
+                existing_id = _safe_text(window[0]["span"].attrs.get("id"))
                 best_anchor = existing_id or preferred_anchor
             else:
                 best_anchor = preferred_anchor
             best_score = score
 
-            if score >= 0.995:
-                break
+        return base_score, advancement_cost
 
-    if best_index is None or best_score < 0.62 or not best_window:
+    # 严格限制只在当前位置附近搜索，优先保证不跳到后文。
+    local_search_end = min(len(candidates), max(0, start_index) + 8)
+    found_local_candidate = False
+    for index, window in _iter_sentence_windows(candidates, max(0, start_index), local_search_end, max_window_size=2):
+        base_score, advancement_cost = consider_window(index, window)
+        if base_score >= 0.76 and advancement_cost <= 4:
+            found_local_candidate = True
+        if base_score >= 0.995 and len(window) == 1:
+            break
+
+    # 找不到足够可靠的近邻句子时，宁可不匹配，也不要跳到后文。
+    if not found_local_candidate or best_index is None or best_score < 0.68 or not best_window:
         return False, preferred_anchor, max(0, start_index)
 
-    best_anchor, window_size = _anchor_block_window(soup, best_window, best_anchor)
+    best_anchor, window_size = _anchor_sentence_window(soup, best_window, best_anchor)
     return True, best_anchor, best_index + window_size
 
 
@@ -486,7 +652,10 @@ def _wrap_text_occurrence(soup: BeautifulSoup, body_tag, target_text: str, ancho
         for fragment in reversed(fragments):
             node.insert_after(fragment)
         node.extract()
-        return True, index
+
+        # 下一句从“已匹配文本之后”的位置继续，避免回头再次命中同一节点前半段。
+        next_index = index + (1 if before_text else 0)
+        return True, next_index
 
     return False, max(0, start_index)
 
@@ -784,7 +953,7 @@ def _inject_audio_into_xhtml(file_path: str, audio_href: str, chapter_title: str
         )
         anchor_to_use = overlay_line["anchor"]
         if not matched:
-            matched, anchor_to_use, block_search_start = _attach_block_anchor(
+            matched, anchor_to_use, block_search_start = _attach_sentence_anchor(
                 soup=soup,
                 body_tag=body_tag,
                 target_text=overlay_line["text"],
@@ -979,11 +1148,13 @@ def _export_source_epub_audiobook(
                     valid_audio_paths.append(audio_path)
                     duration = float(sf.info(audio_path).duration)
                     chapter_duration += duration
-                    overlay_lines.append({
-                        "anchor": f"source-line-{index:03d}-{line_index:04d}",
-                        "text": _safe_text(getattr(line, "text_content", None)),
-                        "duration": duration,
-                    })
+                    overlay_lines.extend(
+                        _split_line_into_overlay_segments(
+                            text=getattr(line, "text_content", None),
+                            duration=duration,
+                            anchor_prefix=f"source-line-{index:03d}-{line_index:04d}",
+                        )
+                    )
                 elif _safe_text(getattr(line, "text_content", None)):
                     skipped_audio_line_count += 1
 
