@@ -1,5 +1,7 @@
 import html
+import difflib
 import os
+import posixpath
 import re
 import shutil
 import subprocess
@@ -7,10 +9,16 @@ import tempfile
 import uuid
 import zipfile
 from datetime import datetime, timezone
+from xml.etree import ElementTree as ET
 
 import soundfile as sf
+from bs4 import BeautifulSoup, NavigableString
+from pypinyin import lazy_pinyin
 
 from app.core.config import getFfmpegPath
+from app.core.epub_parser import get_epub_opf_path
+from app.core.project_assets import PROJECT_MODE_AUDIO_EPUB, normalize_project_mode
+from app.core.text_correct_engine import TextCorrectorFinal
 
 
 FLOWING_CSS_CONTENT = """body {
@@ -105,12 +113,84 @@ body {{
 }}
 """
 
+SOURCE_EPUB_OVERLAY_STYLE = """.sonicvale-audio {
+    margin: 0 0 1.2em;
+    text-indent: 0;
+}
+
+.sonicvale-audio audio {
+    width: 100%;
+}
+
+.-epub-media-overlay-active {
+    color: #7a1f16;
+    background: rgba(255, 214, 153, 0.55);
+    border-radius: 0.18em;
+    box-shadow: 0 0 0 0.16em rgba(255, 214, 153, 0.24);
+}
+"""
+
+
+OPF_NS = {"opf": "http://www.idpf.org/2007/opf"}
+TEXT_CORRECTOR = TextCorrectorFinal()
+
 
 def _safe_text(value: str | None, fallback: str = "") -> str:
     if value is None:
         return fallback
     text = str(value).strip()
     return text if text else fallback
+
+
+def _normalize_match_text(text: str | None) -> str:
+    return TEXT_CORRECTOR.clean_text(text or "")
+
+
+def _to_pronunciation(text: str | None) -> str:
+    normalized = _normalize_match_text(text)
+    if not normalized:
+        return ""
+    return " ".join(lazy_pinyin(normalized, errors="ignore"))
+
+
+def _sequence_ratio(left: str, right: str) -> float:
+    if not left or not right:
+        return 0.0
+    return difflib.SequenceMatcher(None, left, right).ratio()
+
+
+def _best_sentence_alignment_score(target_text: str, candidate_text: str) -> float:
+    normalized_target = _normalize_match_text(target_text)
+    normalized_candidate = _normalize_match_text(candidate_text)
+    if not normalized_target or not normalized_candidate:
+        return 0.0
+
+    if normalized_target in normalized_candidate:
+        return 1.0
+
+    target_pron = _to_pronunciation(normalized_target)
+    candidate_pron = _to_pronunciation(normalized_candidate)
+    best_score = max(
+        _sequence_ratio(normalized_target, normalized_candidate),
+        _sequence_ratio(target_pron, candidate_pron),
+    )
+
+    candidate_sentences = TEXT_CORRECTOR.split_sentences(candidate_text or "")
+    for sentence in candidate_sentences:
+        normalized_sentence = _normalize_match_text(sentence)
+        if not normalized_sentence:
+            continue
+        if normalized_target == normalized_sentence or normalized_target in normalized_sentence:
+            return 1.0
+
+        sentence_pron = _to_pronunciation(normalized_sentence)
+        best_score = max(
+            best_score,
+            _sequence_ratio(normalized_target, normalized_sentence),
+            _sequence_ratio(target_pron, sentence_pron),
+        )
+
+    return best_score
 
 
 def _safe_file_stem(prefix: str, index: int) -> str:
@@ -201,6 +281,214 @@ def _build_chapter_xhtml(title: str, body_html: str, language: str, audio_href: 
     </body>
 </html>
 """
+
+
+def _build_inline_audio_block(audio_href: str, title: str | None = None) -> str:
+    escaped_audio_href = html.escape(audio_href)
+    return (
+        f'\n<section class="sonicvale-audio" epub:type="bridgehead">'
+        '<audio controls="controls" preload="none">'
+        f'<source src="{escaped_audio_href}" type="audio/mpeg" />'
+        '</audio>'
+        '</section>\n'
+    )
+
+
+def _build_source_epub_smil(text_href: str, audio_href: str, segments: list[dict]) -> str:
+    items = []
+    for index, segment in enumerate(segments, start=1):
+        items.append(
+            f'    <par id="{segment["anchor"]}-par-{index:03d}">\n'
+            f'      <text src="{html.escape(text_href)}#{html.escape(segment["anchor"])}" />\n'
+            f'      <audio src="{html.escape(audio_href)}" clipBegin="{segment["clip_begin"]}" clipEnd="{segment["clip_end"]}" />\n'
+            '    </par>'
+        )
+
+    return f"""<?xml version=\"1.0\" encoding=\"utf-8\"?>
+<smil xmlns=\"http://www.w3.org/ns/SMIL\" xmlns:epub=\"http://www.idpf.org/2007/ops\" version=\"3.0\">
+  <body>
+    <seq id="source-overlay-seq" epub:textref="{html.escape(text_href)}">
+{os.linesep.join(items)}
+    </seq>
+  </body>
+</smil>
+"""
+
+
+def _iter_overlay_block_candidates(body_tag):
+    allowed_names = {"p", "div", "li", "blockquote", "section", "article", "td", "dd"}
+    for element in body_tag.find_all(allowed_names):
+        css_classes = element.attrs.get("class", []) if hasattr(element, "attrs") else []
+        if "sonicvale-audio" in css_classes:
+            continue
+        if any(
+            "sonicvale-overlay-group" in (ancestor.attrs.get("class", []) if hasattr(ancestor, "attrs") else [])
+            for ancestor in element.parents
+        ):
+            continue
+        has_nested_block = any(
+            child is not element and _safe_text(child.get_text("", strip=True))
+            for child in element.find_all(allowed_names)
+        )
+        if has_nested_block:
+            continue
+        text = _safe_text(element.get_text("", strip=True))
+        if text:
+            yield element
+
+
+def _blocks_are_consecutive(left_block, right_block) -> bool:
+    sibling = left_block.next_sibling
+    while sibling is not None:
+        if isinstance(sibling, NavigableString) and not _safe_text(str(sibling)):
+            sibling = sibling.next_sibling
+            continue
+        return sibling is right_block
+    return False
+
+
+def _iter_block_windows(blocks: list, start_index: int, end_index: int, max_window_size: int = 4):
+    for index in range(start_index, end_index):
+        yield index, [blocks[index]]
+        parent = getattr(blocks[index], "parent", None)
+        window = [blocks[index]]
+        for next_index in range(index + 1, min(end_index, index + max_window_size)):
+            candidate = blocks[next_index]
+            if getattr(candidate, "parent", None) is not parent:
+                break
+            if not _blocks_are_consecutive(window[-1], candidate):
+                break
+            window = window + [candidate]
+            yield index, window
+
+
+def _anchor_block_window(soup: BeautifulSoup, blocks: list, preferred_anchor: str) -> tuple[str, int]:
+    if len(blocks) == 1:
+        existing_id = _safe_text(blocks[0].attrs.get("id"))
+        anchor = existing_id or preferred_anchor
+        blocks[0]["id"] = anchor
+        return anchor, 1
+
+    first_block = blocks[0]
+    parent = first_block.parent
+    wrapper = soup.new_tag("div")
+    wrapper["id"] = preferred_anchor
+    wrapper["class"] = ["sonicvale-overlay-group"]
+    first_block.insert_before(wrapper)
+
+    for block in blocks:
+        wrapper.append(block.extract())
+
+    return preferred_anchor, len(blocks)
+
+
+def _attach_block_anchor(soup: BeautifulSoup, body_tag, target_text: str, preferred_anchor: str, start_index: int):
+    normalized_target = _normalize_match_text(target_text)
+    if not normalized_target:
+        return False, preferred_anchor, start_index
+
+    blocks = list(_iter_overlay_block_candidates(body_tag))
+    best_index = None
+    best_anchor = preferred_anchor
+    best_score = 0.0
+    search_end = min(len(blocks), max(0, start_index) + 24)
+    best_window = None
+
+    for index, window in _iter_block_windows(blocks, max(0, start_index), search_end):
+        block_text = "".join(block.get_text("", strip=True) for block in window)
+        score = _best_sentence_alignment_score(target_text, block_text)
+        score += min(0.03, max(0, len(window) - 1) * 0.01)
+        if score > best_score:
+            best_index = index
+            best_window = window
+            if len(window) == 1:
+                existing_id = _safe_text(window[0].attrs.get("id"))
+                best_anchor = existing_id or preferred_anchor
+            else:
+                best_anchor = preferred_anchor
+            best_score = score
+
+            if score >= 0.995:
+                break
+
+    if best_index is None or best_score < 0.62 or not best_window:
+        return False, preferred_anchor, max(0, start_index)
+
+    best_anchor, window_size = _anchor_block_window(soup, best_window, best_anchor)
+    return True, best_anchor, best_index + window_size
+
+
+def _iter_overlay_text_nodes(body_tag):
+    for node in body_tag.descendants:
+        if not isinstance(node, NavigableString):
+            continue
+        if not _safe_text(str(node)):
+            continue
+
+        parent = getattr(node, "parent", None)
+        if parent is None:
+            continue
+        if getattr(parent, "name", "") in {"script", "style", "audio"}:
+            continue
+
+        skip_node = False
+        for ancestor in getattr(node, "parents", []):
+            css_classes = ancestor.attrs.get("class", []) if hasattr(ancestor, "attrs") else []
+            if "sonicvale-audio" in css_classes:
+                skip_node = True
+                break
+        if skip_node:
+            continue
+
+        yield node
+
+
+def _wrap_text_occurrence(soup: BeautifulSoup, body_tag, target_text: str, anchor: str, start_index: int):
+    raw_target = _safe_text(target_text)
+    if not raw_target:
+        return False, start_index
+
+    normalized_target = re.sub(r"\s+", "", raw_target)
+    text_nodes = list(_iter_overlay_text_nodes(body_tag))
+    for index in range(max(0, start_index), len(text_nodes)):
+        node = text_nodes[index]
+        raw_text = str(node)
+        match_pos = raw_text.find(raw_target)
+        matched_text = raw_target
+
+        compact_text = re.sub(r"\s+", "", raw_text)
+        if match_pos < 0 and compact_text == normalized_target:
+            match_pos = 0
+            matched_text = raw_text
+
+        if match_pos < 0 and normalized_target and normalized_target in compact_text:
+            match_pos = 0
+            matched_text = raw_text
+
+        if match_pos < 0:
+            continue
+
+        before_text = raw_text[:match_pos]
+        after_text = raw_text[match_pos + len(matched_text):]
+
+        fragments = []
+        if before_text:
+            fragments.append(NavigableString(before_text))
+
+        span_tag = soup.new_tag("span")
+        span_tag["id"] = anchor
+        span_tag.string = matched_text
+        fragments.append(span_tag)
+
+        if after_text:
+            fragments.append(NavigableString(after_text))
+
+        for fragment in reversed(fragments):
+            node.insert_after(fragment)
+        node.extract()
+        return True, index
+
+    return False, max(0, start_index)
 
 
 def _build_nav_xhtml(book_title: str, nav_items: list[dict], language: str, landmark_items: list[dict] | None = None) -> str:
@@ -390,6 +678,387 @@ def _build_container_xml() -> str:
   </rootfiles>
 </container>
 """
+
+
+def _extract_epub_to_directory(source_epub_path: str, extract_dir: str):
+    with zipfile.ZipFile(source_epub_path, "r") as archive:
+        archive.extractall(extract_dir)
+
+
+def _normalize_book_href(source_href: str) -> str:
+    return posixpath.normpath(_safe_text(source_href)).lstrip("./")
+
+
+def _get_opf_relative_dir(opf_rel_path: str) -> str:
+    rel_dir = posixpath.dirname(_normalize_book_href(opf_rel_path))
+    return "" if rel_dir == "." else rel_dir
+
+
+def _resolve_source_manifest_href(source_href: str, opf_rel_path: str) -> str:
+    normalized_source = _normalize_book_href(source_href)
+    opf_rel_dir = _get_opf_relative_dir(opf_rel_path)
+    if opf_rel_dir and normalized_source.startswith(f"{opf_rel_dir}/"):
+        return posixpath.relpath(normalized_source, opf_rel_dir)
+    return normalized_source
+
+
+def _resolve_source_file_path(extract_dir: str, opf_rel_path: str, source_href: str) -> str:
+    normalized_source = _normalize_book_href(source_href)
+    opf_rel_dir = _get_opf_relative_dir(opf_rel_path)
+
+    if opf_rel_dir and normalized_source.startswith(f"{opf_rel_dir}/"):
+        return os.path.join(extract_dir, *normalized_source.split("/"))
+
+    if opf_rel_dir:
+        return os.path.join(extract_dir, *opf_rel_dir.split("/"), *normalized_source.split("/"))
+
+    return os.path.join(extract_dir, *normalized_source.split("/"))
+
+
+def _pack_epub_from_directory(extract_dir: str, output_path: str):
+    os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
+    mimetype_path = os.path.join(extract_dir, "mimetype")
+    if not os.path.exists(mimetype_path):
+        raise ValueError("源 EPUB 缺少 mimetype 文件")
+
+    with zipfile.ZipFile(output_path, "w") as archive:
+        archive.write(mimetype_path, "mimetype", compress_type=zipfile.ZIP_STORED)
+
+        for root, _, files in os.walk(extract_dir):
+            files.sort()
+            for file_name in files:
+                full_path = os.path.join(root, file_name)
+                rel_path = os.path.relpath(full_path, extract_dir).replace("\\", "/")
+                if rel_path == "mimetype":
+                    continue
+                archive.write(full_path, rel_path, compress_type=zipfile.ZIP_DEFLATED)
+
+
+def _inject_audio_into_xhtml(file_path: str, audio_href: str, chapter_title: str, overlay_lines: list[dict]):
+    with open(file_path, "r", encoding="utf-8") as file:
+        content = file.read()
+
+    soup = BeautifulSoup(content, "html.parser")
+    body_tag = soup.body
+    if body_tag is None:
+        raise ValueError(f"章节文件缺少 body 标签: {file_path}")
+
+    head_tag = soup.head
+    if head_tag is None:
+        html_tag = soup.find("html") or soup
+        head_tag = soup.new_tag("head")
+        html_tag.insert(0, head_tag)
+
+    overlay_style = head_tag.find("style", attrs={"id": "sonicvale-overlay-style"})
+    if overlay_style is None:
+        overlay_style = soup.new_tag("style")
+        overlay_style["id"] = "sonicvale-overlay-style"
+        overlay_style.string = SOURCE_EPUB_OVERLAY_STYLE
+        head_tag.append(overlay_style)
+
+    audio_section = body_tag.find("section", class_="sonicvale-audio")
+    audio_fragment = BeautifulSoup(_build_inline_audio_block(audio_href, chapter_title), "html.parser")
+    replacement_section = audio_fragment.find("section")
+    if replacement_section is not None:
+        if audio_section is None:
+            body_tag.insert(0, replacement_section)
+        else:
+            audio_section.replace_with(replacement_section)
+
+    matched_segments = []
+    search_start = 0
+    block_search_start = 0
+    current_offset = 0.0
+    for overlay_line in overlay_lines:
+        duration = float(overlay_line["duration"])
+        clip_begin = _format_clock(current_offset)
+        current_offset += duration
+        clip_end = _format_clock(current_offset)
+
+        matched, search_start = _wrap_text_occurrence(
+            soup=soup,
+            body_tag=body_tag,
+            target_text=overlay_line["text"],
+            anchor=overlay_line["anchor"],
+            start_index=search_start,
+        )
+        anchor_to_use = overlay_line["anchor"]
+        if not matched:
+            matched, anchor_to_use, block_search_start = _attach_block_anchor(
+                soup=soup,
+                body_tag=body_tag,
+                target_text=overlay_line["text"],
+                preferred_anchor=overlay_line["anchor"],
+                start_index=block_search_start,
+            )
+        if matched:
+            matched_segments.append({
+                "anchor": anchor_to_use,
+                "clip_begin": clip_begin,
+                "clip_end": clip_end,
+                "duration": duration,
+            })
+
+    xml_prefix = "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n" if content.lstrip().startswith("<?xml") else ""
+    doctype_match = re.search(r"<!DOCTYPE[^>]+>", content, flags=re.IGNORECASE)
+    doctype_prefix = f"{doctype_match.group(0)}\n" if doctype_match else ""
+    rendered = soup.decode(formatter=None)
+
+    with open(file_path, "w", encoding="utf-8") as file:
+        file.write(f"{xml_prefix}{doctype_prefix}{rendered}")
+
+    return matched_segments
+
+
+def _update_opf_for_audio(opf_path: str, chapter_audio_items: list[dict], total_duration: float, opf_rel_path: str):
+    tree = ET.parse(opf_path)
+    root = tree.getroot()
+    manifest = root.find("opf:manifest", OPF_NS)
+    metadata = root.find("opf:metadata", OPF_NS)
+    if manifest is None:
+        raise ValueError("OPF 缺少 manifest 节点")
+
+    prefix_attr = root.attrib.get("prefix", "").strip()
+    media_prefix = "media: http://www.idpf.org/epub/vocab/overlays/#"
+    if media_prefix not in prefix_attr:
+        root.set("prefix", f"{prefix_attr} {media_prefix}".strip())
+
+    existing_ids = {item.attrib.get("id") for item in manifest.findall("opf:item", OPF_NS)}
+    manifest_items = manifest.findall("opf:item", OPF_NS)
+    for item in chapter_audio_items:
+        if item["audio_id"] not in existing_ids:
+            audio_item = ET.Element(f"{{{OPF_NS['opf']}}}item")
+            audio_item.set("id", item["audio_id"])
+            audio_item.set("href", item["audio_href"])
+            audio_item.set("media-type", "audio/mpeg")
+            manifest.append(audio_item)
+            existing_ids.add(item["audio_id"])
+
+        if item.get("smil_id") and item["smil_id"] not in existing_ids:
+            smil_item = ET.Element(f"{{{OPF_NS['opf']}}}item")
+            smil_item.set("id", item["smil_id"])
+            smil_item.set("href", item["smil_href"])
+            smil_item.set("media-type", "application/smil+xml")
+            manifest.append(smil_item)
+            existing_ids.add(item["smil_id"])
+
+        xhtml_item = None
+        source_item_id = _safe_text(item.get("source_item_id"))
+        if source_item_id:
+            for manifest_item in manifest_items:
+                if _safe_text(manifest_item.attrib.get("id")) == source_item_id:
+                    xhtml_item = manifest_item
+                    break
+
+        if xhtml_item is None:
+            target_manifest_href = _resolve_source_manifest_href(item["source_href"], opf_rel_path)
+            for manifest_item in manifest_items:
+                manifest_href = posixpath.normpath((manifest_item.attrib.get("href") or "").split("#", 1)[0])
+                if manifest_href == target_manifest_href:
+                    xhtml_item = manifest_item
+                    break
+
+        if xhtml_item is not None and item.get("smil_id"):
+            xhtml_item.set("media-overlay", item["smil_id"])
+
+    if metadata is not None:
+        modified_meta = None
+        active_class_meta = None
+        book_duration_meta = None
+        for meta in metadata.findall("opf:meta", OPF_NS):
+            if meta.attrib.get("property") == "dcterms:modified":
+                modified_meta = meta
+            elif meta.attrib.get("property") == "media:active-class":
+                active_class_meta = meta
+            elif meta.attrib.get("property") == "media:duration" and not meta.attrib.get("refines"):
+                book_duration_meta = meta
+
+        if modified_meta is None:
+            modified_meta = ET.Element(f"{{{OPF_NS['opf']}}}meta")
+            modified_meta.set("property", "dcterms:modified")
+            metadata.append(modified_meta)
+
+        if active_class_meta is None:
+            active_class_meta = ET.Element(f"{{{OPF_NS['opf']}}}meta")
+            active_class_meta.set("property", "media:active-class")
+            metadata.append(active_class_meta)
+
+        if book_duration_meta is None:
+            book_duration_meta = ET.Element(f"{{{OPF_NS['opf']}}}meta")
+            book_duration_meta.set("property", "media:duration")
+            metadata.append(book_duration_meta)
+
+        modified_meta.text = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        active_class_meta.text = "-epub-media-overlay-active"
+        book_duration_meta.text = _format_clock(total_duration)
+
+        existing_refines = {
+            meta.attrib.get("refines")
+            for meta in metadata.findall("opf:meta", OPF_NS)
+            if meta.attrib.get("property") == "media:duration" and meta.attrib.get("refines")
+        }
+        for item in chapter_audio_items:
+            if not item.get("smil_id"):
+                continue
+            refine_id = f'#{item["smil_id"]}'
+            if refine_id in existing_refines:
+                continue
+            smil_duration_meta = ET.Element(f"{{{OPF_NS['opf']}}}meta")
+            smil_duration_meta.set("property", "media:duration")
+            smil_duration_meta.set("refines", refine_id)
+            smil_duration_meta.text = _format_clock(item["duration"])
+            metadata.append(smil_duration_meta)
+
+    tree.write(opf_path, encoding="utf-8", xml_declaration=True)
+
+
+def _export_source_epub_audiobook(
+    project,
+    chapters,
+    chapter_lines_map: dict[int, list],
+    output_path: str,
+    line_service,
+):
+    source_epub_path = _safe_text(getattr(project, "source_epub_path", None))
+    if not source_epub_path or not os.path.exists(source_epub_path):
+        raise ValueError("当前项目缺少源 EPUB 文件，请重新创建或重新导入源文件")
+
+    temp_dir = tempfile.mkdtemp(prefix="sonicvale_source_epub_")
+    extract_dir = os.path.join(temp_dir, "book")
+    audio_temp_dir = os.path.join(temp_dir, "audio")
+    os.makedirs(extract_dir, exist_ok=True)
+    os.makedirs(audio_temp_dir, exist_ok=True)
+
+    total_duration = 0.0
+    audio_chapter_count = 0
+    text_only_chapter_count = 0
+    skipped_audio_line_count = 0
+    chapter_audio_items: list[dict] = []
+
+    try:
+        _extract_epub_to_directory(source_epub_path, extract_dir)
+        opf_rel_path = _safe_text(getattr(project, "source_epub_opf_path", None)) or get_epub_opf_path(source_epub_path)
+        opf_full_path = os.path.join(extract_dir, *opf_rel_path.split("/"))
+        if not os.path.exists(opf_full_path):
+            raise ValueError("源 EPUB 的 OPF 文件不存在")
+
+        opf_dir = os.path.dirname(opf_full_path)
+        audio_rel_dir = "sonicvale_audio"
+        smil_rel_dir = "sonicvale_smil"
+        audio_output_dir = os.path.join(opf_dir, audio_rel_dir)
+        smil_output_dir = os.path.join(opf_dir, smil_rel_dir)
+        os.makedirs(audio_output_dir, exist_ok=True)
+        os.makedirs(smil_output_dir, exist_ok=True)
+
+        chapter_lookup = {
+            _safe_text(getattr(chapter, "source_href", None)): chapter
+            for chapter in chapters
+            if _safe_text(getattr(chapter, "source_href", None))
+        }
+
+        if not chapter_lookup:
+            raise ValueError("当前 EPUB 项目缺少章节源文件映射，无法基于原书增强导出")
+
+        for index, chapter in enumerate(chapters, start=1):
+            source_href = _safe_text(getattr(chapter, "source_href", None))
+            if not source_href:
+                text_only_chapter_count += 1
+                continue
+
+            valid_audio_paths = []
+            overlay_lines = []
+            chapter_duration = 0.0
+            chapter_lines = chapter_lines_map.get(chapter.id) or []
+            sorted_lines = sorted(
+                chapter_lines,
+                key=lambda item: ((getattr(item, "line_order", None) or 0), (getattr(item, "id", 0) or 0)),
+            )
+            for line_index, line in enumerate(sorted_lines, start=1):
+                audio_path = getattr(line, "audio_path", None)
+                if audio_path and os.path.exists(audio_path):
+                    valid_audio_paths.append(audio_path)
+                    duration = float(sf.info(audio_path).duration)
+                    chapter_duration += duration
+                    overlay_lines.append({
+                        "anchor": f"source-line-{index:03d}-{line_index:04d}",
+                        "text": _safe_text(getattr(line, "text_content", None)),
+                        "duration": duration,
+                    })
+                elif _safe_text(getattr(line, "text_content", None)):
+                    skipped_audio_line_count += 1
+
+            if not valid_audio_paths:
+                text_only_chapter_count += 1
+                continue
+
+            chapter_token = _safe_file_stem("chapter_audio", index)
+            temp_mp3_path = os.path.join(audio_temp_dir, f"{chapter_token}.mp3")
+            final_audio_href = posixpath.join(audio_rel_dir, f"{chapter_token}.mp3")
+            final_audio_path = os.path.join(audio_output_dir, f"{chapter_token}.mp3")
+            final_smil_href = posixpath.join(smil_rel_dir, f"{chapter_token}.smil")
+            final_smil_path = os.path.join(smil_output_dir, f"{chapter_token}.smil")
+            chapter_title = _safe_text(getattr(chapter, "title", None), f"第{index}章")
+
+            _export_chapter_audio(line_service, valid_audio_paths, temp_mp3_path)
+            shutil.copyfile(temp_mp3_path, final_audio_path)
+            total_duration += chapter_duration
+
+            chapter_file_path = _resolve_source_file_path(extract_dir, opf_rel_path, source_href)
+            if not os.path.exists(chapter_file_path):
+                raise ValueError(f"源 EPUB 章节文件不存在: {source_href}")
+
+            chapter_manifest_href = _resolve_source_manifest_href(source_href, opf_rel_path)
+            audio_href_from_chapter = posixpath.relpath(final_audio_href, posixpath.dirname(chapter_manifest_href) or ".")
+            matched_segments = _inject_audio_into_xhtml(
+                chapter_file_path,
+                audio_href_from_chapter,
+                chapter_title,
+                overlay_lines,
+            )
+
+            chapter_audio_items.append({
+                "audio_id": f"{chapter_token}-audio",
+                "audio_href": final_audio_href,
+                "smil_id": f"{chapter_token}-smil" if matched_segments else None,
+                "smil_href": final_smil_href if matched_segments else None,
+                "source_href": source_href,
+                "source_item_id": _safe_text(getattr(chapter, "source_item_id", None)),
+                "duration": chapter_duration,
+            })
+
+            if matched_segments:
+                text_href_from_smil = posixpath.relpath(chapter_manifest_href, posixpath.dirname(final_smil_href) or ".")
+                audio_href_from_smil = posixpath.relpath(final_audio_href, posixpath.dirname(final_smil_href) or ".")
+                with open(final_smil_path, "w", encoding="utf-8") as smil_file:
+                    smil_file.write(_build_source_epub_smil(text_href_from_smil, audio_href_from_smil, matched_segments))
+            else:
+                skipped_audio_line_count += len([item for item in overlay_lines if item.get("text")])
+
+            audio_chapter_count += 1
+
+        if audio_chapter_count == 0:
+            raise ValueError("没有任何可导出的章节音频，请先生成章节台词音频")
+
+        _update_opf_for_audio(opf_full_path, chapter_audio_items, total_duration, opf_rel_path)
+        _pack_epub_from_directory(extract_dir, output_path)
+    except Exception:
+        if os.path.exists(output_path):
+            os.remove(output_path)
+        raise
+    finally:
+        shutil.rmtree(temp_dir, ignore_errors=True)
+
+    return {
+        "success": True,
+        "output_path": output_path,
+        "chapter_count": len(chapters),
+        "audio_chapter_count": audio_chapter_count,
+        "text_only_chapter_count": text_only_chapter_count,
+        "skipped_audio_line_count": skipped_audio_line_count,
+        "duration": _format_clock(total_duration),
+        "export_mode": "source_epub_enhanced",
+        "export_mode_label": "源 EPUB 增强有声书",
+    }
 
 
 def _build_package_opf(
@@ -803,6 +1472,18 @@ def export_project_audiobook_epub(
 
     normalized_mode = _safe_text(export_mode, "standard")
     normalized_language = _normalize_language(language, normalized_mode)
+    project_mode = normalize_project_mode(getattr(project, "project_mode", None))
+
+    if project_mode == PROJECT_MODE_AUDIO_EPUB:
+        if normalized_mode == "apple_books_read_aloud":
+            raise ValueError("源 EPUB 模式暂不支持 Apple 图书固定版式朗读导出")
+        return _export_source_epub_audiobook(
+            project=project,
+            chapters=chapters,
+            chapter_lines_map=chapter_lines_map,
+            output_path=output_path,
+            line_service=line_service,
+        )
 
     if normalized_mode == "apple_books_read_aloud":
         return _export_apple_read_aloud_epub(

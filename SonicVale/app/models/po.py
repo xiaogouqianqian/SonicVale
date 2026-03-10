@@ -23,6 +23,12 @@ class ProjectPO(Base):
     is_precise_fill = Column(Integer, default=0, nullable=False)
     # 项目根地址
     project_root_path = Column(String(255), nullable=True)
+    project_mode = Column(String(50), default="standard", nullable=False)
+    source_epub_path = Column(String(500), nullable=True)
+    source_epub_name = Column(String(255), nullable=True)
+    source_epub_hash = Column(String(64), nullable=True)
+    source_epub_opf_path = Column(String(500), nullable=True)
+    source_epub_imported_at = Column(DateTime, nullable=True)
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), nullable=False)
     updated_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc), nullable=False)
 
@@ -82,6 +88,8 @@ class ChapterPO(Base):
     title = Column(String(255), nullable=False)
     order_index = Column(Integer, nullable=True)
     text_content = Column(Text, nullable=True)  # SQLite 没有 LongText，用 Text 替代
+    source_href = Column(String(500), nullable=True)
+    source_item_id = Column(String(255), nullable=True)
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), nullable=False)
     updated_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc),
                         nullable=False)

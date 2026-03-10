@@ -61,6 +61,13 @@
                                     {{ item.is_precise_fill == 1 ? '开启' : '关闭' }}
                                 </el-tag>
                             </div>
+                            <div class="meta-item">
+                                <el-icon><Folder /></el-icon>
+                                <span class="meta-label">模式:</span>
+                                <el-tag size="small" :type="item.project_mode === 'audio_epub' ? 'warning' : 'info'" effect="plain">
+                                    {{ item.project_mode === 'audio_epub' ? '有声 EPUB' : '普通' }}
+                                </el-tag>
+                            </div>
                         </div>
 
                         <div class="project-footer">
@@ -134,6 +141,34 @@
                     </el-input>
                 </el-form-item>
 
+                <el-form-item label="项目模式">
+                    <el-switch
+                        v-model="audioEpubEnabled"
+                        active-text="有声 EPUB"
+                        inactive-text="普通模式"
+                        @change="handleProjectModeChange"
+                    />
+                </el-form-item>
+
+                <el-form-item v-if="audioEpubEnabled" label="源 EPUB">
+                    <el-input v-model="form.source_epub_name" readonly placeholder="请选择源 EPUB 文件">
+                        <template #append>
+                            <el-button @click="pickSourceEpub">选择</el-button>
+                        </template>
+                    </el-input>
+                    <div style="font-size: 12px; color: var(--el-text-color-secondary); margin-top: 6px; line-height: 1.5;">
+                        启用后将直接绑定源 EPUB，后续导出会在不破坏原书结构的基础上追加有声书能力。
+                    </div>
+                </el-form-item>
+
+                <input
+                    ref="sourceEpubInput"
+                    type="file"
+                    accept=".epub,application/epub+zip"
+                    style="display: none"
+                    @change="handleSourceEpubSelected"
+                />
+
 
 
 
@@ -151,7 +186,7 @@
 import { ref, onMounted, watch } from 'vue'
 import { ElMessage, ElLoading } from 'element-plus'
 // import { Plus, Delete } from '@element-plus/icons-vue'
-import { fetchProjects, createProject, deleteProject } from '../api/project'
+import { fetchProjects, createProject, createAudioEpubProject, deleteProject } from '../api/project'
 import { fetchLLMProviders, fetchTTSProviders } from '../api/provider'
 import { fetchPromptList } from '../api/prompt'
 import { Plus, Delete, Cpu, Mic, Document, Clock, CircleCheck, CircleClose, Folder } from "@element-plus/icons-vue"
@@ -159,6 +194,8 @@ const prompts = ref([])
 
 const projects = ref([])
 const dialogVisible = ref(false)
+const audioEpubEnabled = ref(false)
+const sourceEpubInput = ref(null)
 
 // 表单数据
 const form = ref({
@@ -170,6 +207,9 @@ const form = ref({
     prompt_id: null,
     is_precise_fill: 0,      // ✅ 新增字段
     project_root_path: null,
+    project_mode: 'standard',
+    source_epub_file: null,
+    source_epub_name: '',
 })
 
 // 校验规则
@@ -246,7 +286,37 @@ const handleSubmit = () => {
     formRef.value.validate(async (valid) => {
         if (valid) {
             try {
-                const res = await createProject(form.value)
+                if (audioEpubEnabled.value && !form.value.source_epub_file) {
+                    ElMessage.warning('启用有声 EPUB 模式时必须选择源 EPUB 文件')
+                    return
+                }
+
+                let res
+                if (audioEpubEnabled.value) {
+                    const formData = new FormData()
+                    formData.append('name', form.value.name)
+                    formData.append('description', form.value.description || '')
+                    if (form.value.llm_provider_id != null) formData.append('llm_provider_id', String(form.value.llm_provider_id))
+                    if (form.value.llm_model) formData.append('llm_model', form.value.llm_model)
+                    if (form.value.tts_provider_id != null) formData.append('tts_provider_id', String(form.value.tts_provider_id))
+                    if (form.value.prompt_id != null) formData.append('prompt_id', String(form.value.prompt_id))
+                    formData.append('is_precise_fill', String(form.value.is_precise_fill ?? 0))
+                    formData.append('project_root_path', form.value.project_root_path || '')
+                    formData.append('file', form.value.source_epub_file)
+                    res = await createAudioEpubProject(formData)
+                } else {
+                    res = await createProject({
+                        name: form.value.name,
+                        description: form.value.description,
+                        llm_provider_id: form.value.llm_provider_id,
+                        llm_model: form.value.llm_model,
+                        tts_provider_id: form.value.tts_provider_id,
+                        prompt_id: form.value.prompt_id,
+                        is_precise_fill: form.value.is_precise_fill,
+                        project_root_path: form.value.project_root_path,
+                        project_mode: 'standard',
+                    })
+                }
                 if (res?.code === 200) {
                     ElMessage.success('项目创建成功')
                     dialogVisible.value = false
@@ -261,7 +331,12 @@ const handleSubmit = () => {
                         prompt_id: null,
                         is_precise_fill: 0,
                         project_root_path: null,
+                        project_mode: 'standard',
+                        source_epub_file: null,
+                        source_epub_name: '',
                     })
+                    audioEpubEnabled.value = false
+                    if (sourceEpubInput.value) sourceEpubInput.value.value = ''
 
                     projects.value = await fetchProjects()
                 } else {
@@ -288,6 +363,35 @@ const pickRootDir = async () => {
     } catch (e) {
         ElMessage.error(`选择失败：${e?.message || '未知错误'}`)
     }
+}
+
+
+function handleProjectModeChange(enabled) {
+    form.value.project_mode = enabled ? 'audio_epub' : 'standard'
+    if (!enabled) {
+        form.value.source_epub_file = null
+        form.value.source_epub_name = ''
+        if (sourceEpubInput.value) sourceEpubInput.value.value = ''
+    }
+}
+
+
+function pickSourceEpub() {
+    sourceEpubInput.value?.click()
+}
+
+
+function handleSourceEpubSelected(event) {
+    const file = event.target.files?.[0]
+    if (!file) return
+    if (!file.name.toLowerCase().endsWith('.epub')) {
+        ElMessage.error('仅支持选择 EPUB 文件')
+        event.target.value = ''
+        return
+    }
+
+    form.value.source_epub_file = file
+    form.value.source_epub_name = file.name
 }
 </script>
 

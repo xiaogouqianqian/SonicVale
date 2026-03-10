@@ -10,6 +10,8 @@ class ChapterCreateDTO(BaseModel):
     order_index: Optional[int] = None
     id: Optional[int] = None
     text_content : Optional[str] = None
+    source_href: Optional[str] = None
+    source_item_id: Optional[str] = None
     after_chapter_id: Optional[int] = None
 
 class ChapterResponseDTO(BaseModel):
@@ -18,5 +20,7 @@ class ChapterResponseDTO(BaseModel):
     order_index: Optional[int] = None
     id: Optional[int] = None
     text_content: Optional[str] = None
+    source_href: Optional[str] = None
+    source_item_id: Optional[str] = None
     created_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None

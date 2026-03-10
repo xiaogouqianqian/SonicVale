@@ -13,6 +13,9 @@
                 <el-tag effect="light" class="ml8">章节 {{ stats.chapterCount }}</el-tag>
                 <el-tag effect="light" class="ml8">角色 {{ stats.roleCount }}</el-tag>
                 <el-tag effect="light" class="ml8">台词 {{ stats.lineCount }}</el-tag>
+                <el-tag effect="plain" class="ml8" :type="isAudioEpubProject ? 'warning' : 'info'">
+                    {{ isAudioEpubProject ? '有声 EPUB 项目' : '普通项目' }}
+                </el-tag>
                 <el-tag effect="light" type="danger" class="ml8">剩余生成：{{ queue_rest_size }}</el-tag>
                 <!-- ✅ 精准填充状态 -->
                 <el-tag class="ml8" effect="light" :type="project?.is_precise_fill == 1 ? 'success' : 'info'">
@@ -45,9 +48,9 @@
                 <el-button type="success" @click="exportProjectAudiobookEpub()" class="ml8">
                     <el-icon>
                         <Operation />
-                    </el-icon> 导出 EPUB3 有声书
+                    </el-icon> {{ isAudioEpubProject ? '导出增强版有声 EPUB' : '导出 EPUB3 有声书' }}
                 </el-button>
-                <el-button type="warning" @click="exportProjectAudiobookEpub('apple_books_read_aloud')" class="ml8">
+                <el-button v-if="!isAudioEpubProject" type="warning" @click="exportProjectAudiobookEpub('apple_books_read_aloud')" class="ml8">
                     <el-icon>
                         <Operation />
                     </el-icon> 导出 Apple 图书朗读版
@@ -87,11 +90,11 @@
                     <div class="aside-actions">
 
 
-                        <el-button type="success" plain size="small" @click="handleBatchImport">
+                        <el-button type="success" plain size="small" @click="handleBatchImport" :disabled="isAudioEpubProject">
                             <el-icon>
                                 <Upload />
                             </el-icon>
-                            <span>导入 TXT/EPUB</span>
+                            <span>{{ isAudioEpubProject ? '源 EPUB 模式已锁定' : '导入 TXT/EPUB' }}</span>
 
                         </el-button>
                                                 <el-button type="warning" plain size="small" @click="batchSplitByLLM">
@@ -108,14 +111,14 @@
                             <span>批量导出音频</span>
                         </el-button>
 
-                        <el-button type="danger" plain size="small" @click="batchDeleteChapters">
+                        <el-button type="danger" plain size="small" @click="batchDeleteChapters" :disabled="isAudioEpubProject">
                             <el-icon>
                                 <Delete />
                             </el-icon>
                             <span>批量删除</span>
                         </el-button>
 
-                        <el-button type="primary" plain size="small" @click="dialogNewChapter = true">
+                        <el-button type="primary" plain size="small" @click="dialogNewChapter = true" :disabled="isAudioEpubProject">
                             <el-icon>
                                 <Plus />
                             </el-icon>
@@ -628,6 +631,12 @@
                         </template>
                         </el-input>
                 </el-form-item>
+                <el-form-item label="项目模式">
+                    <el-input :model-value="isAudioEpubProject ? '有声 EPUB' : '普通模式'" readonly />
+                </el-form-item>
+                <el-form-item v-if="isAudioEpubProject" label="源 EPUB 文件">
+                    <el-input :model-value="project?.source_epub_name || '未绑定'" readonly />
+                </el-form-item>
 
 
             </el-form>
@@ -917,6 +926,7 @@ const projectId = Number(route.params.id)
 // 顶部
 const project = ref(null)
 const stats = ref({ chapterCount: 0, roleCount: 0, lineCount: 0 })
+const isAudioEpubProject = computed(() => (project.value?.project_mode || 'standard') === 'audio_epub')
 
 // —— 项目设置（复用“创建项目”表单结构）——
 const settingsVisible = ref(false)
@@ -931,6 +941,8 @@ const settingsForm = ref({
     prompt_id: null,
     is_precise_fill: null,      // ✅ 新增字段，默认 0
     project_root_path: null,
+    project_mode: 'standard',
+    source_epub_name: null,
 })
 const settingsRules = {
     name: [{ required: true, message: '请输入项目名称', trigger: 'blur' }],
@@ -960,7 +972,9 @@ async function openProjectSettings() {
         tts_provider_id: project.value?.ttsProviderId ?? project.value?.tts_provider_id ?? null,
         prompt_id: project.value?.promptId ?? project.value?.prompt_id ?? null,
         is_precise_fill: project.value?.is_precise_fill ?? null,
-        project_root_path: project.value?.project_root_path ?? null
+        project_root_path: project.value?.project_root_path ?? null,
+        project_mode: project.value?.project_mode ?? 'standard',
+        source_epub_name: project.value?.source_epub_name ?? null,
 
     }
     console.log('表格详情', settingsForm.value)
@@ -1582,6 +1596,11 @@ async function exportProjectAudiobookEpub(exportMode = 'standard') {
         ? `当前勾选的 ${selectedChapterIds.length} 个章节`
         : `当前项目全部 ${selectedChapterIds.length} 个章节`
 
+    if (isAudioEpubProject.value && exportMode === 'apple_books_read_aloud') {
+        ElMessage.warning('源 EPUB 模式暂不支持 Apple 图书固定版式导出')
+        return
+    }
+
     const isAppleReadAloud = exportMode === 'apple_books_read_aloud'
     const exportMeta = isAppleReadAloud
         ? {
@@ -1595,12 +1614,14 @@ async function exportProjectAudiobookEpub(exportMode = 'standard') {
             fileSuffix: '-apple-readaloud'
         }
         : {
-            dialogTitle: '导出 EPUB3 有声书',
-            confirmText: `将导出 ${exportScopeText} 为 EPUB 3 有声书。已配音章节会附带同步音频，未配音章节会保留为纯文本内容。是否继续？`,
-            pickerTitle: '选择 EPUB 3 有声书输出位置',
-            loadingText: '正在生成 EPUB 3 有声书，请稍候...',
-            successTitle: 'EPUB 3 有声书导出完成',
-            successText: 'EPUB 3 有声书导出完成',
+            dialogTitle: isAudioEpubProject.value ? '导出增强版有声 EPUB' : '导出 EPUB3 有声书',
+            confirmText: isAudioEpubProject.value
+                ? `将基于当前项目绑定的原始 EPUB，增强导出 ${exportScopeText} 的有声版本。原始 EPUB 文件不会被修改，是否继续？`
+                : `将导出 ${exportScopeText} 为 EPUB 3 有声书。已配音章节会附带同步音频，未配音章节会保留为纯文本内容。是否继续？`,
+            pickerTitle: isAudioEpubProject.value ? '选择增强版有声 EPUB 输出位置' : '选择 EPUB 3 有声书输出位置',
+            loadingText: isAudioEpubProject.value ? '正在增强原始 EPUB 并写入章节音频，请稍候...' : '正在生成 EPUB 3 有声书，请稍候...',
+            successTitle: isAudioEpubProject.value ? '增强版有声 EPUB 导出完成' : 'EPUB 3 有声书导出完成',
+            successText: isAudioEpubProject.value ? '增强版有声 EPUB 导出完成' : 'EPUB 3 有声书导出完成',
             defaultLanguage: 'zh-CN',
             fileSuffix: ''
         }
@@ -3839,6 +3860,11 @@ async function updateLineIsDone(row, val) {
 
 import { decodeUtf8OrGbk } from "../utils/utf8-or-gbk.js";
 async function handleBatchImport() {
+    if (isAudioEpubProject.value) {
+        ElMessage.warning('当前项目已绑定源 EPUB，不支持再次导入 TXT 或 EPUB')
+        return
+    }
+
     let loadingInstance = null
     try {
         // 1️⃣ 弹出确认框

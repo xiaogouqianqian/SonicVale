@@ -1,14 +1,23 @@
 import os
 import shutil
 import tempfile
+from datetime import datetime, timezone
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 from typing import List
 
 from sqlalchemy.orm import Session
 
 from app.core.config import getConfigPath
 from app.core.epub_exporter import export_project_audiobook_epub
+from app.core.epub_parser import parse_epub, parse_epub_book
+from app.core.project_assets import (
+    PROJECT_MODE_AUDIO_EPUB,
+    PROJECT_MODE_STANDARD,
+    compute_file_sha256,
+    ensure_project_structure,
+    normalize_project_mode,
+)
 from app.core.response import Res
 from app.db.database import get_db
 from app.dto.project_dto import ProjectCreateDTO, ProjectResponseDTO, ProjectImportDTO, ProjectAudiobookExportDTO
@@ -51,6 +60,37 @@ def get_line_service(db: Session = Depends(get_db)) -> LineService:
     return LineService(repository, role_repository, tts_repository)
 
 
+def _build_unique_chapter_title(project_id: int, raw_title: str | None, chapter_service: ChapterService, used_titles: set[str]) -> str:
+    base_title = (raw_title or "").strip() or "未命名章节"
+    candidate = base_title
+    suffix = 2
+
+    while candidate in used_titles or chapter_service.repository.get_by_name(candidate, project_id):
+        candidate = f"{base_title}（{suffix}）"
+        suffix += 1
+
+    used_titles.add(candidate)
+    return candidate
+
+
+def _create_project_chapters_from_epub(project_id: int, chapter_service: ChapterService, chapter_list: list[dict]):
+    used_titles: set[str] = set()
+    created_count = 0
+    for ch in chapter_list:
+        title = _build_unique_chapter_title(project_id, ch.get("chapter_name"), chapter_service, used_titles)
+        entity = ChapterEntity(
+            project_id=project_id,
+            title=title,
+            text_content=ch.get("content"),
+            source_href=ch.get("source_href"),
+            source_item_id=ch.get("source_item_id"),
+        )
+        created = chapter_service.create_chapter(entity)
+        if created:
+            created_count += 1
+    return created_count
+
+
 @router.post("/", response_model=Res[ProjectResponseDTO],
              summary="创建项目",
              description="根据项目信息创建项目，项目名称不可重复")
@@ -61,6 +101,9 @@ def create_project(dto: ProjectCreateDTO, service: ProjectService = Depends(get_
     - service: Service 层注入
     """
     try:
+        dto.project_mode = normalize_project_mode(dto.project_mode or PROJECT_MODE_STANDARD)
+        if dto.project_mode == PROJECT_MODE_AUDIO_EPUB:
+            return Res(data=None, code=400, message="启用有声 EPUB 模式时，请使用专用创建接口并上传 EPUB 文件")
         # DTO → Entity
         entity = ProjectEntity(**dto.__dict__)
 
@@ -77,6 +120,89 @@ def create_project(dto: ProjectCreateDTO, service: ProjectService = Depends(get_
 
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.post("/create-audio-epub", response_model=Res[ProjectResponseDTO],
+             summary="创建有声 EPUB 项目",
+             description="创建启用源 EPUB 模式的项目，并直接导入用户上传的 EPUB 文件")
+async def create_audio_epub_project(
+    name: str = Form(...),
+    description: str | None = Form(None),
+    llm_provider_id: int | None = Form(None),
+    llm_model: str | None = Form(None),
+    tts_provider_id: int | None = Form(None),
+    prompt_id: int | None = Form(None),
+    is_precise_fill: int | None = Form(0),
+    project_root_path: str | None = Form(None),
+    file: UploadFile = File(...),
+    service: ProjectService = Depends(get_service),
+    chapter_service: ChapterService = Depends(get_chapter_service),
+):
+    if not project_root_path:
+        return Res(data=None, code=400, message="项目根路径不能为空")
+
+    suffix = os.path.splitext(file.filename or "")[1].lower()
+    if suffix != ".epub":
+        return Res(data=None, code=400, message="启用有声 EPUB 模式时必须上传 EPUB 文件")
+
+    entity = ProjectEntity(
+        name=name,
+        description=description,
+        llm_provider_id=llm_provider_id,
+        llm_model=llm_model,
+        tts_provider_id=tts_provider_id,
+        prompt_id=prompt_id,
+        is_precise_fill=is_precise_fill,
+        project_root_path=project_root_path,
+        project_mode=PROJECT_MODE_AUDIO_EPUB,
+    )
+
+    project, message = service.create_project(entity)
+    if project is None:
+        return Res(data=None, code=400, message=message)
+
+    paths = ensure_project_structure(project.project_root_path, project.id)
+    source_epub_path = paths["source_epub_path"]
+    try:
+        with open(source_epub_path, "wb") as target:
+            shutil.copyfileobj(file.file, target)
+
+        parsed = parse_epub_book(source_epub_path)
+        chapter_list = parsed.get("chapters") or []
+        if not chapter_list:
+            raise ValueError("未能从 EPUB 中解析出章节内容")
+
+        service.update_project(project.id, {
+            "name": project.name,
+            "description": project.description,
+            "llm_provider_id": project.llm_provider_id,
+            "llm_model": project.llm_model,
+            "tts_provider_id": project.tts_provider_id,
+            "prompt_id": project.prompt_id,
+            "is_precise_fill": project.is_precise_fill,
+            "project_root_path": project.project_root_path,
+        })
+        service.repository.update(project.id, {
+            "project_mode": PROJECT_MODE_AUDIO_EPUB,
+            "source_epub_path": source_epub_path,
+            "source_epub_name": file.filename,
+            "source_epub_hash": compute_file_sha256(source_epub_path),
+            "source_epub_opf_path": parsed.get("metadata", {}).get("opf_path"),
+            "source_epub_imported_at": datetime.now(timezone.utc),
+        })
+
+        created_count = _create_project_chapters_from_epub(project.id, chapter_service, chapter_list)
+        if created_count == 0:
+            raise ValueError("EPUB 章节导入失败")
+
+        created_project = service.get_project(project.id)
+        return Res(data=ProjectResponseDTO(**created_project.__dict__), code=200, message="创建成功")
+    except Exception as exc:
+        project_dir = os.path.join(project.project_root_path, str(project.id))
+        if os.path.exists(project_dir):
+            shutil.rmtree(project_dir, ignore_errors=True)
+        service.delete_project(project.id)
+        return Res(data=None, code=400, message=f"创建有声 EPUB 项目失败: {exc}")
 
 # 按id查找
 @router.get("/{project_id}", response_model=Res[ProjectResponseDTO],
@@ -152,6 +278,12 @@ def delete_project(project_id: int, service: ProjectService = Depends(get_servic
 def import_project(project_id: int, dto: ProjectImportDTO,service: ProjectService = Depends(get_service),
                    chapter_service: ChapterService = Depends(get_chapter_service)):
 
+    project = service.get_project(project_id)
+    if project is None:
+        return Res(code=400, message="项目不存在")
+    if normalize_project_mode(project.project_mode) == PROJECT_MODE_AUDIO_EPUB:
+        return Res(code=400, message="当前项目已绑定源 EPUB，不支持普通文本导入")
+
     content = dto.content
     # 删除该项目下的所有章节
     # chapters = chapter_service.get_all_chapters(project_id)
@@ -171,9 +303,6 @@ def import_project(project_id: int, dto: ProjectImportDTO,service: ProjectServic
     return Res(code=200, message="导入成功")
 
 
-# 新增：EPUB 文件导入
-from fastapi import File, UploadFile
-
 @router.post("/{project_id}/import-epub")
 async def import_epub(project_id: int,
                       file: UploadFile = File(...),
@@ -183,6 +312,8 @@ async def import_epub(project_id: int,
     project = service.get_project(project_id)
     if project is None:
         return Res(code=400, message="项目不存在")
+    if normalize_project_mode(project.project_mode) == PROJECT_MODE_AUDIO_EPUB:
+        return Res(code=400, message="当前项目已绑定源 EPUB，不支持通用 EPUB 导入")
 
     # 将上传文件保存到临时位置
     suffix = os.path.splitext(file.filename)[1]
@@ -195,7 +326,6 @@ async def import_epub(project_id: int,
 
     # 解析 epub
     try:
-        from app.core.epub_parser import parse_epub
         chapter_list = parse_epub(tmp_path)
     except Exception as e:
         return Res(code=500, message=f"EPUB 解析失败: {e}")
@@ -209,8 +339,7 @@ async def import_epub(project_id: int,
     if not chapter_list:
         return Res(code=400, message="未能解析出章节内容")
 
-    for ch in chapter_list:
-        chapter_service.create_chapter(ChapterEntity(project_id=project_id, title=ch.get("chapter_name"), text_content=ch.get("content")))
+    _create_project_chapters_from_epub(project_id, chapter_service, chapter_list)
 
     return Res(code=200, message="EPUB 导入成功", data=chapter_list)
 

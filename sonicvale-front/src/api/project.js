@@ -20,6 +20,9 @@ export function fetchProjects() {
         promptId: p.prompt_id,
         is_precise_fill: p.is_precise_fill,  // ✅ 新增字段
         project_root_path: p.project_root_path,
+        project_mode: p.project_mode || 'standard',
+        source_epub_name: p.source_epub_name,
+        source_epub_path: p.source_epub_path,
       }))
 
       // 🔥 按更新时间排序（最新在前）
@@ -37,6 +40,12 @@ export function deleteProject(id) {
 // 创建项目
 export function createProject(data) {
   return request.post('/projects', data)
+}
+
+export function createAudioEpubProject(formData) {
+  return request.post('/projects/create-audio-epub', formData, {
+    headers: { 'Content-Type': 'multipart/form-data' }
+  })
 }
 
 export function getProjectDetail(projectId) {

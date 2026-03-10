@@ -15,6 +15,7 @@ class ProjectCreateDTO(BaseModel):
     is_precise_fill: Optional[int] = None
     # 项目路径
     project_root_path : Optional[str] = None
+    project_mode: Optional[str] = "standard"
 
 class ProjectResponseDTO(BaseModel):
     id: int
@@ -28,6 +29,12 @@ class ProjectResponseDTO(BaseModel):
     is_precise_fill : Optional[int] = None
     # 项目路径
     project_root_path : Optional[str] = None
+    project_mode: Optional[str] = "standard"
+    source_epub_path: Optional[str] = None
+    source_epub_name: Optional[str] = None
+    source_epub_hash: Optional[str] = None
+    source_epub_opf_path: Optional[str] = None
+    source_epub_imported_at: Optional[datetime] = None
     created_at: datetime
     updated_at: datetime
 

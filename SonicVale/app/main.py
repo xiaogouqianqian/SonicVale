@@ -176,6 +176,36 @@ def add_batch_tag_column():
         else:
             print("batch_tag 列已存在，跳过。")
 
+
+def add_project_mode_columns():
+    with engine.begin() as conn:
+        result = conn.execute(text("PRAGMA table_info(projects)"))
+        columns = [row[1] for row in result.fetchall()]
+
+        if "project_mode" not in columns:
+            conn.execute(text("ALTER TABLE projects ADD COLUMN project_mode TEXT DEFAULT 'standard'"))
+        if "source_epub_path" not in columns:
+            conn.execute(text("ALTER TABLE projects ADD COLUMN source_epub_path TEXT"))
+        if "source_epub_name" not in columns:
+            conn.execute(text("ALTER TABLE projects ADD COLUMN source_epub_name TEXT"))
+        if "source_epub_hash" not in columns:
+            conn.execute(text("ALTER TABLE projects ADD COLUMN source_epub_hash TEXT"))
+        if "source_epub_opf_path" not in columns:
+            conn.execute(text("ALTER TABLE projects ADD COLUMN source_epub_opf_path TEXT"))
+        if "source_epub_imported_at" not in columns:
+            conn.execute(text("ALTER TABLE projects ADD COLUMN source_epub_imported_at DATETIME"))
+
+
+def add_chapter_source_mapping_columns():
+    with engine.begin() as conn:
+        result = conn.execute(text("PRAGMA table_info(chapters)"))
+        columns = [row[1] for row in result.fetchall()]
+
+        if "source_href" not in columns:
+            conn.execute(text("ALTER TABLE chapters ADD COLUMN source_href TEXT"))
+        if "source_item_id" not in columns:
+            conn.execute(text("ALTER TABLE chapters ADD COLUMN source_item_id TEXT"))
+
 def get_tts_service(db: Session = Depends(get_db)) -> TTSProviderService:
     return TTSProviderService(TTSProviderRepository(db))
 
@@ -201,6 +231,10 @@ async def startup_event():
     add_project_root_path_column()
     # 添加台词批次标签字段
     add_batch_tag_column()
+    # 添加项目模式与源 EPUB 资产字段
+    add_project_mode_columns()
+    # 添加章节与源 EPUB 的映射字段
+    add_chapter_source_mapping_columns()
 
     # 2) 初始化共享运行时
     try:

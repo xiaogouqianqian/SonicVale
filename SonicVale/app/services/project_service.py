@@ -3,6 +3,7 @@ import re
 
 from sqlalchemy import Sequence
 
+from app.core.project_assets import PROJECT_MODE_STANDARD, normalize_project_mode
 from app.entity.project_entity import ProjectEntity
 from app.models.po import ProjectPO
 
@@ -28,6 +29,7 @@ class ProjectService:
         if not os.path.exists(entity.project_root_path):
             print("项目根路径不存在")
             return  None, "项目根路径不存在"
+        entity.project_mode = normalize_project_mode(entity.project_mode or PROJECT_MODE_STANDARD)
         # 手动将entity转化为po
         po = ProjectPO(**entity.__dict__)
         res = self.repository.create(po)
@@ -68,6 +70,15 @@ class ProjectService:
         name = data["name"]
         if self.repository.get_by_name(name) and self.repository.get_by_name(name).id != project_id:
             return False
+        for read_only_field in [
+            "project_mode",
+            "source_epub_path",
+            "source_epub_name",
+            "source_epub_hash",
+            "source_epub_opf_path",
+            "source_epub_imported_at",
+        ]:
+            data.pop(read_only_field, None)
         self.repository.update(project_id, data)
         return True
 
